@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: financialtransactions-postgres
+    environment:
+      # Credencial sintética de laboratório. A porta é publicada apenas em 127.0.0.1 do host;
+      # outros containers na mesma rede Docker ainda alcançam o serviço.
+      POSTGRES_USER: ft
+      POSTGRES_PASSWORD: ft_local_dev_only
+      POSTGRES_DB: financialtransactions
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - ft_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ft -d financialtransactions"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  ft_pgdata:
