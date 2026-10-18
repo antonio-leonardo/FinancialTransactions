@@ -45,11 +45,36 @@ public class MovementAmountTests
     [Fact]
     public void EqualityIsByValue()
     {
-        MovementAmount.TryCreate(10.10m, out var first, out _);
-        MovementAmount.TryCreate(10.10m, out var second, out _);
-        MovementAmount.TryCreate(10.11m, out var other, out _);
+        var createdFirst = MovementAmount.TryCreate(10.10m, out var first, out _);
+        var createdSecond = MovementAmount.TryCreate(10.10m, out var second, out _);
+        var createdOther = MovementAmount.TryCreate(10.11m, out var other, out _);
+
+        // Pré-condições: se qualquer criação falhar, o teste reprova aqui em vez de
+        // comparar nulos por acidente (um nulo faria Assert.NotEqual passar sem provar nada).
+        Assert.True(createdFirst);
+        Assert.True(createdSecond);
+        Assert.True(createdOther);
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotNull(other);
 
         Assert.Equal(first, second);
         Assert.NotEqual(first, other);
+    }
+
+    [Fact]
+    public void EqualityIgnoresTrailingZeroScale()
+    {
+        var createdPlain = MovementAmount.TryCreate(10.10m, out var plain, out _);
+        var createdScaled = MovementAmount.TryCreate(10.100m, out var scaled, out _);
+
+        Assert.True(createdPlain);
+        Assert.True(createdScaled);
+        Assert.NotNull(plain);
+        Assert.NotNull(scaled);
+
+        // 10.10m e 10.100m são o mesmo valor em centavos; a igualdade do record segue decimal.Equals.
+        Assert.Equal(plain, scaled);
+        Assert.Equal(plain.GetHashCode(), scaled.GetHashCode());
     }
 }

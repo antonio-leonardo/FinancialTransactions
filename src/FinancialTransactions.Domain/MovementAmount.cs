@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace FinancialTransactions.Domain;
 
 /// <summary>Magnitude de um único movimento, em BRL com duas casas. Não representa saldo.</summary>
@@ -11,7 +13,7 @@ public sealed record MovementAmount
 
     private MovementAmount(decimal value) => Value = value;
 
-    public static bool TryCreate(decimal value, out MovementAmount? amount, out string? error)
+    public static bool TryCreate(decimal value, [NotNullWhen(true)] out MovementAmount? amount, [NotNullWhen(false)] out string? error)
     {
         amount = null;
         error = null;
