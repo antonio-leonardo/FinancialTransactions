@@ -32,7 +32,7 @@ API, ferramenta de carga e PostgreSQL competem pelos mesmos processadores. Os n�
 | Determinismo | gerador por trabalhador com semente `20261019 + índice do trabalhador`; a sequência de cada trabalhador é reproduzível, o intercalamento entre trabalhadores não é |
 | Identidade | a ferramenta emite um token por cliente com a chave da API (`FT__Auth__SigningKey`, gerada por execução); chave e tokens ficam só em memória |
 | Classificação | **técnica**: qualquer 5xx, timeout, exceção de transporte. **Negócio esperado**: `200` em replay com o mesmo `movementId`. **Sucesso**: `201` em POST novo, `200` em GET. **Inesperado**: qualquer outra resposta (por exemplo `422`, `401`, `409`), tratada como defeito a investigar, nunca como esperada |
-| Latência | do envio ao corpo completo recebido; só requisições com resposta (um timeout não tem latência) |
+| Latência | do envio ao corpo completo recebido; **timeouts e falhas de transporte são contabilizados como falhas técnicas e ficam fora da distribuição de latências calculada pela ferramenta** (nas execuções registradas não houve nenhum, logo os percentis não são afetados) |
 | Percentis | amostras ordenadas, índice `ceil(p × n) − 1`, sem interpolação; `n` registrado. Todas as amostras medidas estão em `amostras.csv` |
 | Vazão | requisições medidas ÷ segundos entre o fim do aquecimento e o término da última requisição medida (≈ 60,03 s) |
 | Recursos | `docker stats --no-stream` do container do PostgreSQL a cada 5 s, coletado em PowerShell (não pela ferramenta) |
@@ -131,6 +131,7 @@ Cada replay executa o `INSERT`, recebe a violação `23505` da constraint de ide
 - Histórico de 100 mil movimentos em 400 contas (250 por conta); a distribuição é uniforme e não imita contas com volumes muito desiguais.
 - Os planos são de um banco recém-carregado e analisado, com cache quente; um banco com muita escrita, bloat ou cache frio pode se comportar diferente.
 - O ensaio não exercita falhas de dependência (isso foi verificado em P03) nem múltiplas instâncias da API.
+- A reconciliação não encontrou divergências nas execuções registradas. Não foram realizados controles negativos por adulteração para validar integralmente a capacidade de detecção do reconciliador.
 
 ## Como reproduzir
 
