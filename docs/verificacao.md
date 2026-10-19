@@ -150,21 +150,42 @@ Percentis p95 (ms), execuções 1 e 2: POST novo 89,2 e 85,9; POST replay 116,3 
 
 ## 5. CI
 
-Fonte: *CI* (consulta anônima à API pública do GitHub, 19/10/2026 06:10 UTC, nesta tentativa) e *leitura do auditor-master* (log).
+Fonte: *CI* (consulta anônima à API pública do GitHub, sem credencial) e *leitura do auditor-master* (log). Em 19/10/2026 o histórico do repositório foi reescrito pelo responsável do projeto (reautoria dos commits): **todos os SHAs mudaram e as árvores são idênticas**. Os registros da seção 5.1 usam os SHAs do histórico anterior; a árvore de cada um foi confrontada com o commit equivalente do histórico atual pela API (`abcdf19…` e `4463e38`: mesma árvore `47822e0742bde2fd30f662f2e8604d65a744e6a2`; `9ded7b0…` e `47909c9`: mesma árvore `3d38c79308fd3e1c388bf0ee0d6952ac0068fb5b`).
+
+### 5.1 Versão anterior (histórico anterior à reescrita)
 
 | Item | Valor |
 |---|---|
 | Workflow | `ci` (`.github/workflows/ci.yml`), disparado em `push` na `main` e em `pull_request` |
-| SHA | `abcdf19c073dc95505010a593126248dc2bcc79a` (também o HEAD local desta tentativa) |
+| SHA | `abcdf19c073dc95505010a593126248dc2bcc79a` (SHA do histórico anterior; commit equivalente atual: `4463e38`) |
 | Execuções para esse SHA | 1: [run 39201091893](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39201091893), número 3, tentativa 1, evento `push`, criada em 19/10/2026 04:45 UTC, `status` `completed`, `conclusion` `success` |
 | Job | `build-and-test` (id 117894019834), 04:45:41 a 04:46:42 UTC, `success`. Etapas: preparação do job, inicialização do contêiner PostgreSQL, checkout, setup do .NET, Restore, Build, Test e finalizações, todas `success` |
 | Comandos do workflow | `dotnet msbuild FinancialTransactions.sln -target:Restore -warnaserror`; `dotnet build FinancialTransactions.sln -c Release --no-restore --no-incremental -warnaserror`; `dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vstest.runsettings`, com `FT_TEST_ADMIN_CONNECTION` para o serviço `postgres:17` |
 | Ambiente e contadores (log, **leitura do auditor-master**, 19/10/2026) | Ubuntu 24.04.5, SDK 10.0.402, PostgreSQL 17.11; restore e build com `0 Warning(s)`; sete assemblies; `Passed! 92` (unidade) e `Passed! 45` (integração) |
-| Outros commits | segundo a *governança local* em 19/10/2026, o workflow também executou com `success` em `fe545e9` e `ccf7bc7`; **não reconferido nesta tentativa** |
+| Outros commits | segundo a *governança local* em 19/10/2026, o workflow também executou com `success` nos commits anteriores a esse; **não reconferido** |
 
-Redação sobre avisos: restore e build **sem diagnósticos de warning de compilação**. O log do workflow contém avisos de outra natureza, que **não** são warnings de build: depreciação do módulo `punycode` (Node); aviso de que `actions/checkout@v4` e `actions/setup-dotnet@v4` declaram Node.js 20 e rodaram em Node.js 24; e mensagens `FATAL: database "ft" does not exist` do serviço PostgreSQL, porque a sonda `pg_isready -U ft` não informa a base (`POSTGRES_DB=postgres`). Estão registrados como pendências de manutenção do workflow (seção 6).
+Redação sobre avisos, **nessa versão do workflow**: restore e build **sem diagnósticos de warning de compilação**. O log continha avisos de outra natureza, que não são warnings de build: depreciação do módulo `punycode` (Node); aviso de que `actions/checkout@v4` e `actions/setup-dotnet@v4` declaram Node.js 20 e rodaram em Node.js 24; e mensagens `FATAL: database "ft" does not exist` do serviço PostgreSQL, porque a sonda `pg_isready -U ft` não informa a base (`POSTGRES_DB=postgres`). Foram tratados na manutenção da seção 5.2.
 
-**O que a CI não executa:** o ensaio de carga; as sondagens manuais (reinício do PostgreSQL, limite de corpo contra Kestrel real); o roteiro do README. Também não publica relatórios de teste. A CI de `abcdf19` é evidência **dessa versão** do código; o commit que contém esta documentação terá a sua própria execução.
+### 5.2 Execução da versão A e manutenção do workflow
+
+Versão A: commit `87645ed9e3ed57328eabbd55917062188f370547`, branch `main`. Fonte: *CI* (consulta pela API pública em 19/10/2026, 08:03 UTC, por esta aceitação) e *leitura do auditor-master* onde indicado.
+
+| Item | Valor |
+|---|---|
+| Execuções para o SHA de A | 1 (todas as execuções e tentativas do workflow `ci` para esse SHA): [run 39219056456](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39219056456), número 6, tentativa 1, evento `push`, criada em 19/10/2026 07:54 UTC, `status` `completed`, `conclusion` `success` |
+| Job | `build-and-test` (id 117949777273), 07:54:40 a 07:55:38 UTC, `success`. Etapas, todas `success`: preparação do job, inicialização do contêiner, `Run actions/checkout@v7`, `Run actions/setup-dotnet@v6`, Restore, Build, Test, finalizações |
+| Artefatos | 0 (no run e no repositório) |
+| O que a API não mostra | o conteúdo do log; o log do run de A **não foi lido** (exige credencial) |
+
+| Decisão de manutenção | Mudança em `ci.yml` | Estado | Evidência |
+|---|---|---|---|
+| `GOV-P04-CI-01` (sonda) | `pg_isready -U ft` → `pg_isready -U ft -d postgres` | **aplicada e executada com sucesso**: o serviço ficou saudável e restore, build e testes passaram | CI de A. Efeito no log: *leitura do auditor-master*, em 19/10/2026, do [run 39217752456](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39217752456) (número 5, commit do histórico anterior à reescrita, **árvore idêntica à de A**, confirmada pela API): sem a mensagem periódica sobre a base `ft`; permanecem mensagens esperadas de outros cenários (base `ft_test_*` inexistente, violações de unicidade). É leitura de execução remota por terceiro, de um run com árvore idêntica, não do run de A |
+| `GOV-P04-CI-02` (`actions/checkout`) | `@v4` → `@v7` | **aplicada e executada com sucesso** | etapa `Run actions/checkout@v7` `success`. Razão da decisão: major maior que 4, `runs.using` `node24`, nenhuma entrada usada pelo workflow, gatilhos `push` e `pull_request` (a mudança de comportamento do v7 é só para `pull_request_target` e `workflow_run`) |
+| `GOV-P04-CI-02` (`actions/setup-dotnet`) | `@v4` → `@v6` | **aplicada e executada com sucesso** | etapa `Run actions/setup-dotnet@v6` `success`. Razão: major maior que 4, `node24`, entrada `dotnet-version` inalterada, notas do v6 sem mudança de entradas, saídas ou comportamento |
+
+Da *leitura do auditor-master* do run 39217752456 (mesma árvore): runner 2.337.0, `actions/checkout@v7` e `actions/setup-dotnet@v6` resolvidos, restore e build com `0 Warning(s)`, 92 + 45 testes aprovados, sem os avisos de `punycode` nem de Node.js 20.
+
+**O que a CI não executa:** o ensaio de carga; as sondagens manuais (reinício do PostgreSQL, limite de corpo contra Kestrel real); o roteiro do README. Também não publica relatórios de teste. A CI de A é evidência **dessa versão**; o commit que contiver esta documentação terá a sua própria execução.
 
 ## 6. Verificações que não existem ou são parciais (pendências)
 
@@ -175,21 +196,108 @@ Redação sobre avisos: restore e build **sem diagnósticos de warning de compil
 | T14 | **Parcial**: reconciliação pós-carga executada; não há fluxo de correção ou estorno (fora de escopo). |
 | Reconciliação | A reconciliação não encontrou divergências nas execuções registradas; não foram realizados controles negativos por adulteração para validar integralmente a capacidade de detecção do reconciliador. |
 | Relógio nos testes | `TimeProvider` é injetado e resolvido como `TimeProvider.System`; a fixture de testes não oferece controle ou congelamento sistemático do tempo. |
-| Checkout novo | O `git clone` do README e a aceitação em cópia limpa **não foram verificados** nesta tentativa; ficam para P06. |
-| Diagramas Mermaid | Conferidos por leitura; renderização no GitHub fica para P06. |
-| `GOV-P04-CI-01` | Manutenção do workflow (P06): sonda do serviço PostgreSQL com `-d postgres` (`pg_isready -U ft -d postgres`) para eliminar as mensagens `FATAL: database "ft" does not exist`. Não alterado nesta tentativa. |
-| `GOV-P04-CI-02` | Manutenção do workflow (P06): avaliar versões das actions (`checkout`, `setup-dotnet`) que declaram Node.js 20. Não alterado nesta tentativa. |
+| Checkout novo | **Verificado em A** (seção 8): clone novo da URL pública em contexto sem credencial, roteiro de aceitação com `rc` 0 e passo a passo do README. Ressalva: o comando `docker compose up -d --wait` não foi exercitado a partir do clone (ver seção 8). As menções "fica para P06" das seções 1.1 e 2.2 descrevem o estado da consolidação anterior e ficam como registro histórico; esta linha e a seção 8 as substituem. |
+| Diagramas Mermaid | Conferidos por leitura; **renderização no GitHub: pendente de confirmação visual do responsável do projeto** (não informada até esta aceitação). |
+| `GOV-P04-CI-01` | **Aplicada e executada com sucesso** (seção 5.2). O desaparecimento da mensagem sobre a base `ft` está registrado por leitura de terceiro de um run de árvore idêntica; o log do run de A não foi lido. |
+| `GOV-P04-CI-02` | **Aplicada e executada com sucesso** para as duas actions (`checkout@v7`, `setup-dotnet@v6`; seção 5.2). |
+| Descrição do repositório (About) | **Pendente (ação do responsável do projeto).** Consulta anônima à API em 19/10/2026: a descrição vigente ainda não está em redação própria (reproduz texto de origem externa); `topics` vazio e `homepage` nulo. Não é corrigível por commit: é metadado do GitHub. Sugestão: "API .NET 10 com histórico de créditos e débitos, consultas temporais de saldo e operações idempotentes. PostgreSQL e JWT para demonstração local." |
+| E-mail dos commits | **Feito**: o responsável reescreveu o histórico em 19/10/2026 (reautoria). No clone de A, 9 commits, 18 de 18 campos (autor e committer) com um único domínio de e-mail e um único nome. Commits antigos podem continuar acessíveis por SHA no cache do GitHub; **não verificado**. |
+| Histórico: varredura de textos | Feita nas 9 revisões, com ressalva sobre a prova positiva (seção 8.5). |
 | Ruído de log no replay | Cada replay gera dois registros de nível `fail` do EF Core (a violação `23505` esperada); sem erro técnico associado (medido em [carga.md](carga.md)). Alertas por nível de log precisariam excluí-los. Não alterado. |
 | Máximos de latência da execução 2 do ensaio | Picos isolados (até 401,7 ms) com causa não investigada (ver [carga.md](carga.md)). |
-| Divergências README ↔ código desta revisão | Corrigidas no texto, sem alterar código (ver "Decisões do ciclo P05" em [escopo.md](escopo.md)): replay "reconstruído a partir da resposta"; exclusividade da credencial de laboratório; estado da CI; comentário de posição sem chamada às 11:30. Nenhum defeito de código foi encontrado nesta revisão. |
+| Divergências README ↔ código da consolidação anterior | Corrigidas no texto, sem alterar código (ver "Decisões do ciclo P05" em [escopo.md](escopo.md)): replay "reconstruído a partir da resposta"; exclusividade da credencial de laboratório; estado da CI; comentário de posição sem chamada às 11:30. Nenhum defeito de código foi encontrado. |
 
 ## 7. Checklist de entrega
 
+Todos os estados desta seção se referem à versão A (commit `87645ed9e3ed57328eabbd55917062188f370547`); os detalhes estão na seção 8.
+
 | Item obrigatório | Estado | Evidência |
 |---|---|---|
-| Implementação em C# | executado e aprovado | build de 7 projetos, `rc` 0 (seção 2.1, P05) |
-| Testes automatizados | executado e aprovado | 92 + 45 testes, duas rodadas, `rc` 0 (seção 2.1, P05); CI: 92 + 45 (leitura do auditor-master) |
-| Repositório público | implementado; verificação por checkout novo **não feita**, pendente para P06 | `https://github.com/antonio-leonardo/FinancialTransactions`, público desde 18/10/2026; consulta anônima à API do GitHub nesta tentativa |
-| README para executar localmente | executado e aprovado, exceto o `git clone` (P06) | roteiro executado contra banco descartável (seção 2.2) |
-| Documentação no repositório | executado e aprovado | `README.md` e `docs/` (escopo, arquitetura, verificação, carga); verificador de links e privacidade (seção 2.3) |
-| Build com zero erros e zero avisos de compilação | executado e aprovado | `build -warnaserror` `rc` 0, `0 Warning(s)` e `0 Error(s)` (esta tentativa); CI sem diagnósticos de warning de compilação (run 39201091893) |
+| Implementação em C# | executado e aprovado | build de 7 projetos no clone novo de A, `rc` 0 (seção 8.3) |
+| Testes automatizados | executado e aprovado | clone novo de A: 92 + 45 executados e aprovados, 0 ignorados, TRX novos (seção 8.3); CI de A: etapa Test `success` (seção 5.2) |
+| Repositório público | executado e aprovado | clone novo da URL pública `https://github.com/antonio-leonardo/FinancialTransactions` em contexto sem credencial, `HEAD` = SHA da `refs/heads/main` pública (seção 8.4); o roteiro de aceitação também confere o SHA público pela API sem credencial |
+| README para executar localmente | executado e aprovado, com a ressalva do passo do `docker compose` | passo a passo do README seguido no clone de A, 8 chamadas HTTP e a contagem final, todas OK (seção 8.4); o `docker compose up` não foi exercitado a partir do clone |
+| Documentação no repositório | executado e aprovado | verificador de links e privacidade no clone de A: 0 problemas e 0 ocorrências (seção 8.4) |
+| Build com zero erros e zero avisos de compilação | executado e aprovado | `build -warnaserror` do roteiro `rc` 0 no clone de A; CI de A: Build `success` |
+
+## 8. Portão de aceitação
+
+Modelo de fechamento do guia, preenchido para a versão A em 19/10/2026. Fonte: *executor local*, em clone novo da URL pública, em pastas temporárias próprias desta aceitação; *CI* e *leitura do auditor-master* onde indicado. A saída zero do roteiro de aceitação **não é aprovação**: ela encerra as etapas técnicas no escopo declarado; o fechamento é desta seção, com revisão humana.
+
+### 8.1 Identidade e ambiente
+
+| Item | Valor |
+|---|---|
+| Versão | commit `87645ed9e3ed57328eabbd55917062188f370547`, branch `main` (histórico reescrito em 19/10/2026) |
+| Arquivos pendentes | nenhum: o clone ficou com a árvore limpa antes e depois do roteiro |
+| Data | 19/10/2026 |
+| Ambiente | Windows 11 10.0.26100; SDK .NET 10.0.402; PowerShell 7.6.7; Git 2.56.0; Docker com o container do projeto (PostgreSQL 17) saudável |
+| Inventário | 7 projetos, todos `net10.0` (3 bibliotecas/app em `src/`, 2 ferramentas em `tools/`, 2 de teste em `tests/`); nenhum excluído; runner VSTest; mínimos de execução 92 (unidade) e 45 (integração), as contagens reais da versão anterior aceita (regressão, não quota) |
+
+### 8.2 Requisitos, critérios e evidências
+
+| Requisito | Critério que pode reprovar | Evidência real | Estado |
+|---|---|---|---|
+| Linguagem C# | Projeto sem decisão no inventário ou fora da solução | `dotnet sln list` e `.csproj` em disco conferidos pelo roteiro: 7 de 7 | executado e aprovado |
+| Testes automatizados | Zero testes descobertos não demonstra execução | TRX novos: 92 executados/92 aprovados e 45/45, 0 ignorados, 0 falhos | executado e aprovado |
+| Repositório público | Usuário sem credencial não consegue acessar a versão | clone da URL literal em contexto isolado; `ls-remote` = `HEAD` do clone; API pública confirma repositório público e `refs/heads/main` = SHA | executado e aprovado |
+| Execução local | Checkout novo não segue o README | passo a passo seguido no clone (seção 8.4) | executado e aprovado, com a ressalva do `docker compose` |
+| Documentação | Caminho relativo ou documento da versão não existe | `requiredFiles` (7) presentes; verificador de links, âncoras e privacidade 0/0 | executado e aprovado |
+| Build e diagnósticos | Erro ou warning | restore e build `-warnaserror` da solução e de cada projeto, `rc` 0 | executado e aprovado |
+
+### 8.3 Execução do roteiro de aceitação
+
+Comando: o roteiro do guia (`Verificar-Entrega.ps1`, cópia com o mesmo SHA-256 do original, lida por inteiro antes de executar) em processo filho com `TEMP`/`TMP` apontando para pasta própria, sobre o clone, com o inventário acima, o repositório público e a branch `main`. **Código de saída 0**, 61 s. Nenhum TRX foi reutilizado: o roteiro grava TRX novos em pasta temporária nova.
+
+| Etapa | Resultado |
+|---|---|
+| Árvore limpa antes e depois | sim |
+| Identidade | `HEAD` do clone = SHA de A = SHA público da `main` |
+| `dotnet msbuild … -target:Restore -warnaserror` | `rc` 0 |
+| `dotnet build` da solução (`-c Release --no-restore --no-incremental -warnaserror`) e de cada um dos 7 projetos | `rc` 0 em todos |
+| `dotnet test` da unidade | 92 executados, 92 aprovados, 0 ignorados |
+| `dotnet test` da integração | 45 executados, 45 aprovados, 0 ignorados |
+| `resultado.json` | `technicalChecks` `CONCLUIDAS_NO_ESCOPO_DECLARADO`; `delivery` `PENDENTE_REVISAO_E_REPRODUCAO_INDEPENDENTE`, como esperado: o roteiro não aprova entrega |
+
+Política de diagnósticos: warnings promovidos a erro em restore e build (`-warnaserror`); `Directory.Build.props` trata avisos como erros; não há supressão generalizada.
+
+### 8.4 Reprodutibilidade e segurança
+
+- **Clone em contexto isolado.** O `ls-remote` e o `git clone` da URL pública literal rodaram em um processo filho: diretório neutro (fora de qualquer repositório); variáveis de ambiente `GIT_*`/`GCM_*` de repositório, configuração, proxy, SSH e rastreamento removidas e as de configuração global/sistema, prompt e askpass definidas só nesse processo; configuração global vazia e do sistema desativada. O diagnóstico de configuração (`config --list` com valores omitidos) antes do acesso à rede teve **0 entradas**; depois do clone, só as 10 entradas locais esperadas (`core.*`, `remote.origin.*`, `branch.main.*`), com a URL igual à literal e sem credencial embutida. Nenhuma credencial foi pedida nem fornecida; nenhum valor de configuração foi registrado. Uma variável herdada do ambiente do executor (editor de mensagens do Git), fora da lista prevista, foi removida só no processo filho, por decisão registrada do responsável.
+- **README seguido no clone.** Banco descartável próprio criado e removido pela execução (nenhum `ft_doc_*` ficou), API própria na porta `5100` (livre antes e depois), chave e token só em memória. Chave JWT, `dotnet tool restore`, `dotnet ef database update`, `dotnet run` da API, token pela ferramenta e os exemplos: 8 chamadas HTTP (`201`, `200`, `201`, `200`, `200`, `200`, `200` no replay, `422 idempotency_key_conflict` no conflito) e a contagem final de 2 movimentos, **9 de 9 OK**, com status e corpos registrados. Nenhum segredo apareceu nas evidências. Adaptações de isolamento, declaradas: banco descartável via `--connection` e variável de ambiente; chamadas com `Invoke-WebRequest -SkipHttpErrorCheck` para capturar o corpo. **Ressalva:** o passo 2 do README (`docker compose up -d --wait`) **não foi executado a partir do clone**, porque o `docker-compose.yml` fixa `container_name` e a porta 15432 e um `up` em outro diretório criaria um segundo projeto Compose em conflito com o container do projeto; no lugar, verificou-se que o `docker-compose.yml` do clone é igual, byte a byte (SHA-256), ao usado para criar o container em execução, e que o container estava saudável. Etapas indispensáveis que o README não explique: nenhuma encontrada. Nenhum arquivo de segredos locais do desenvolvedor (user-secrets) continha chaves.
+- **Documentos relativos.** Verificador de links, âncoras, títulos, tipos de diagrama e privacidade, sobre o README e os quatro documentos de `docs/` do clone: 0 problemas, 0 ocorrências de privacidade, 3 diagramas Mermaid. Limites do verificador como na seção 2.3. A renderização dos diagramas no GitHub **não foi verificada** (seção 6).
+- **Dados sintéticos e segredos.** Ver a revisão do histórico na seção 8.5.
+
+### 8.5 Revisão do que está publicado
+
+- **Histórico (arquivos de texto).** 9 revisões enumeradas (`rev-list --all`, `rc` 0), cada uma varrida com cada padrão, uma de cada vez (`git grep -n -I -E -e <padrão> <revisão> --`; `rc` 0 = ocorrência, 1 = nenhuma, outro = erro; nenhum erro). Padrões: JWT, chave privada, token de provedor, `Password=`, `SigningKey` com literal, caminhos pessoais e referências a material privado, mais um padrão sabidamente ausente. O padrão ausente devolveu `rc` 1 nas 9 revisões. Resultado: **nenhum** JWT, chave privada, token de provedor, caminho pessoal ou referência a material privado em qualquer revisão. As ocorrências de `Password=` são só `ft_local_dev_only` (credencial sintética de laboratório, declarada no compose, no workflow, na configuração de desenvolvimento, na fixture de testes e na documentação) e `x` (connection string inalcançável de um teste); as de `SigningKey` são um único literal sintético de 46 caracteres em um teste negativo de logs. `-I` exclui binários: a conclusão é sobre os textos pesquisados.
+- **Ressalva sobre a prova positiva.** Esperava-se que `Password=` desse ocorrência em `docker-compose.yml` no commit inicial, para provar que o mecanismo encontra a credencial sintética. Não deu: lá a credencial está na sintaxe YAML `POSTGRES_PASSWORD: …`, que esse padrão não cobre (`rc` 1, sem erro). O mecanismo foi então provado de outra forma, e a cobertura ampliada: o padrão `ft_local_dev_only` devolveu `rc` 0 com ocorrência em `docker-compose.yml` no commit inicial e em todas as 9 revisões, e um padrão `PASSWORD:` (sintaxe YAML) devolveu ocorrências apenas no compose e no workflow, sempre com o valor sintético declarado. O mecanismo também devolveu `rc` 0 com ocorrências para `Password=` nas outras 8 revisões. **A prova positiva nos termos originais não foi obtida**; a alternativa acima fica registrada como complemento, não como substituta.
+- **Mensagens.** 9 mensagens (só assunto, nenhuma com corpo), sem nome de contratante, de pessoa ou de processo.
+- **Autoria.** Autor e committer iguais em 9 de 9 commits; 18 de 18 campos de e-mail com **um único domínio**, um único endereço e um único nome. O e-mail profissional que constava nos dois primeiros commits do histórico anterior não existe no histórico atual.
+- **Metadados do repositório.** Público; branch padrão `main`; `topics` vazio; `homepage` nulo; descrição **pendente** (seção 6).
+- **Artefatos e logs da CI.** 0 artefatos. Os logs exigem credencial e não foram lidos por esta aceitação; a ausência de artefatos não certifica os logs.
+
+### 8.6 Controles negativos
+
+Cada controle roda em uma cópia de laboratório própria do clone (com `.git`, sem `bin`, `obj` e `TestResults`); o clone de aceitação não foi alterado. A regra: o caso saudável passa e o defeituoso falha **pelo motivo previsto**; reprovação por outro motivo seria falha do controle.
+
+| Controle | Defeito introduzido | `rc` | Mensagem que reprovou | Causa e o que prova |
+|---|---|---|---|---|
+| N1, build | linha `int unused;` em um método de `MovementRules.cs` | sem mutação: 0 e 0; com mutação: restore 0, build **1** | `error CS0168: The variable 'unused' is declared but never used` (2 ocorrências), promovido por `-warnaserror` | Prova que a etapa de build, com a mesma captura do roteiro, reprova warning promovido a erro. É um harness da etapa de build, **não** a execução integral do roteiro |
+| N1b, árvore suja | a mesma mutação, executando o roteiro integral | 1 | `Árvore não limpa. Preserve as alterações…` | Prova a guarda de integridade: reprova antes de qualquer build (só os dois passos de `git` foram executados). O motivo é a árvore suja, não o warning |
+| N2, projeto omitido | inventário de laboratório sem a ferramenta de carga | 1 | `Projeto sem decisão:` seguido do caminho do projeto omitido | Prova que um `.csproj` em disco sem decisão no inventário interrompe antes de compilar |
+| N3, SHA público diferente | cópia em outro commit (`47909c9`, do histórico atual; com os documentos obrigatórios e árvore limpa), remoto em A | 1 | `SHA público diferente do checkout.` | O roteiro compilou e testou (45 e 92 aprovados) e só então reprovou a identidade: prova a conferência do SHA público, 44 s |
+| N4, contagem abaixo do mínimo | mínimo 1000 para a unidade no inventário de laboratório | 1 | `Executados 92; mínimo exigido 1000.` | Prova só a contagem abaixo do mínimo. **Não cobre** descoberta vazia, módulo sem casos, todos ignorados nem TRX ausente |
+| N5, helper do roteiro | processo filho que escreve em `stderr` e sai com 0 / sai com 7 | 0 do harness | caso `exit 0`: não lançou, `stderr` capturado no log; caso `exit 7`: `pwsh falhou (7); consulte …` | Prova a captura e a decisão do `Invoke-Checked` copiado (stderr não reprova; código diferente de zero reprova). Não certifica o roteiro inteiro. PowerShell 7.6.7 |
+
+Nenhum controle é promovido a certificação do roteiro inteiro. Controles do guia **não** exercitados nesta aceitação: módulo sem casos, todos os casos ignorados, módulo de teste omitido, segundo módulo falho, TRX antigo em outra pasta, indisponibilidade da rede ou limite da API do GitHub.
+
+### 8.7 O que o roteiro prova e o que não prova
+
+Prova: que, em checkout limpo da versão pública, todos os projetos inventariados compilam sem warnings, os dois módulos de teste executam e passam com ao menos o mínimo declarado, e a `main` pública aponta para o commit verificado. Não prova: a classificação humana dos projetos no inventário, a qualidade das asserções, o funcionamento fora do ambiente de teste, a renderização dos diagramas, a ausência de conteúdo reproduzido de fontes externas (conferência humana) nem a segurança de produção. Dados são sintéticos; nenhum requisito regulatório é alegado.
+
+### 8.8 Decisão
+
+- **Aprovação técnica:** **aprovado no escopo verificado** (versão A, 19/10/2026): clone novo em contexto sem credencial; roteiro de aceitação com `rc` 0; 92 + 45 testes novos aprovados; build sem warnings; README seguido (com a ressalva do passo do `docker compose`); controles negativos reprovando pelas causas previstas. Ressalvas: prova positiva da varredura do histórico nos termos originais não obtida (seção 8.5); log da CI de A não lido; renderização dos diagramas não verificada.
+- **Condições de publicação:** descrição do repositório (About): **pendente** (responsável: dono do repositório; trocar por redação própria); e-mail dos commits: **feito** (histórico reescrito em 19/10/2026, 18 de 18 campos com um único domínio); renderização dos diagramas no GitHub: **pendente** de confirmação visual do responsável; nenhum risco aceito formalmente até esta data.
+- **Próxima ação:** o responsável troca a descrição do repositório, confirma a renderização dos três diagramas, comita e envia esta documentação (a versão que a contém será a versão final B) e informa o SHA de B; a verificação final de B repete o roteiro de aceitação em clone novo e confere o que mudou em relação a A.
