@@ -321,12 +321,12 @@ public sealed class ConsolidationRig : IAsyncDisposable
     }
 
     /// <summary>Executa o coordenador em processo (a mesma classe do modo --backfill) e devolve o código de saída.</summary>
-    public Task<int> RunCoordinatorAsync(IBootstrapFailurePoints? points = null, TestConnectionFactory? factory = null, CancellationToken cancellationToken = default)
+    public Task<int> RunCoordinatorAsync(IBootstrapFailurePoints? points = null, TestConnectionFactory? factory = null, ILogger<BootstrapCoordinator>? logger = null, CancellationToken cancellationToken = default)
     {
         var coordinator = new BootstrapCoordinator(
             factory ?? new TestConnectionFactory(Real()),
             points ?? new NoBootstrapFailurePoints(),
-            NullLogger<BootstrapCoordinator>.Instance);
+            logger ?? NullLogger<BootstrapCoordinator>.Instance);
         return coordinator.RunAsync(cancellationToken);
     }
 

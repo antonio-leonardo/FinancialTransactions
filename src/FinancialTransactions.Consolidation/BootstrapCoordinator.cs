@@ -86,6 +86,7 @@ public sealed partial class BootstrapCoordinator(
     public async Task<int> RunAsync(CancellationToken cancellationToken)
     {
         NpgsqlConnection? lockSession = null;
+        var lockAcquired = false;
         try
         {
             // Sessão própria e sem pool: fechar a conexão encerra a sessão e libera o lock mesmo se o unlock falhar.
@@ -98,6 +99,8 @@ public sealed partial class BootstrapCoordinator(
                     LogLockBusy(logger);
                     return CoordinatorExitCodes.LockBusy;
                 }
+
+                lockAcquired = true;
             }
 
             return await RunLockedAsync(cancellationToken).ConfigureAwait(false);
@@ -115,7 +118,7 @@ public sealed partial class BootstrapCoordinator(
         {
             if (lockSession is not null)
             {
-                await ReleaseAsync(lockSession).ConfigureAwait(false);
+                await ReleaseAsync(lockSession, lockAcquired).ConfigureAwait(false);
             }
         }
     }
@@ -245,14 +248,22 @@ public sealed partial class BootstrapCoordinator(
         return CoordinatorExitCodes.Diverged;
     }
 
-    private async Task ReleaseAsync(NpgsqlConnection lockSession)
+    /// <summary>
+    /// Só quem adquiriu o lock o libera: a sessão que recebeu "ocupado" não é dona dele, e <c>pg_advisory_unlock</c> sem posse devolve falso
+    /// com aviso do servidor. A sessão própria é descartada em todos os caminhos (sem pool, fechar a conexão encerra a sessão).
+    /// </summary>
+    private async Task ReleaseAsync(NpgsqlConnection lockSession, bool lockAcquired)
     {
         try
         {
-            if (lockSession.State == ConnectionState.Open)
+            if (lockAcquired && lockSession.State == ConnectionState.Open)
             {
                 await using var unlock = new NpgsqlCommand(UnlockSql, lockSession);
-                await unlock.ExecuteScalarAsync(CancellationToken.None).ConfigureAwait(false);
+                var released = await unlock.ExecuteScalarAsync(CancellationToken.None).ConfigureAwait(false);
+                if (released is not true)
+                {
+                    LogUnlockNotOwned(logger);
+                }
             }
         }
         catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
@@ -292,4 +303,7 @@ public sealed partial class BootstrapCoordinator(
 
     [LoggerMessage(EventId = 5007, Level = LogLevel.Warning, Message = "Falha ao liberar o lock consultivo ({FailureType}); a sessão será encerrada.")]
     private static partial void LogUnlockFailed(ILogger logger, string failureType);
+
+    [LoggerMessage(EventId = 5008, Level = LogLevel.Warning, Message = "pg_advisory_unlock devolveu falso: a sessão não era dona do lock que tentou liberar.")]
+    private static partial void LogUnlockNotOwned(ILogger logger);
 }

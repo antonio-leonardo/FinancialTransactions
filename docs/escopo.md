@@ -181,6 +181,8 @@ Registradas aqui porque afetam o contrato observável e a operação. H12 foi su
 - **Bootstrap com a escrita ativa:** conjunto inicial por identidade, registro de controle na origem, ativação idempotente no destino, fases que só avançam (ADR em [arquitetura.md](arquitetura.md), seção "Bootstrap").
 - **Extração do projeto `Auth`:** o JWT local e o escopo por cliente saíram da API de lançamentos para uma biblioteca sem referência a outros projetos; `AccountAccess` (acesso a dados) ficou na API.
 - **Classificação de indisponibilidade única:** `ApiExceptionHandler.IsDependencyUnavailable` delega a `Infrastructure/DependencyFailure`, usada também pelo Worker e pela API do consolidado. Comportamento da API de lançamentos inalterado (os cinco testes de unidade existentes continuam passando).
+- **`observedAt` (correção pós-auditoria):** é o `statement_timestamp()` da instrução que conta os eventos na origem, isto é, o início da observação (o snapshot da contagem é igual ou posterior). Descreve o que foi observado; não é tempo de commit.
+- **Lock do coordenador (correção pós-auditoria):** só a sessão que adquiriu o lock consultivo o libera; a sessão própria é descartada em todos os caminhos.
 - **Ajuste de fixture:** a limpeza dos testes da API de lançamentos passou a apagar também a Outbox por conta, para que os eventos de um teste não contaminem os do seguinte.
 
 ## Cenários da matriz e aplicabilidade

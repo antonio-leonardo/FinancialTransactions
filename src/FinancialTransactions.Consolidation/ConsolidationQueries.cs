@@ -5,13 +5,22 @@ namespace FinancialTransactions.Consolidation;
 /// <summary>Contagens da Outbox para o recorte e o instante da leitura, ambos na origem.</summary>
 public sealed record UnresolvedEvents(long Unresolved, long Failed, DateTimeOffset ObservedAt);
 
-/// <summary>Estado de atualização (origem): eventos das contas do recorte, de qualquer dia, ainda não confirmados (0) ou em quarentena (2).</summary>
+/// <summary>
+/// Estado de atualização (origem): eventos das contas do recorte, de qualquer dia, ainda não confirmados (0) ou em quarentena (2).
+/// <para>
+/// <b>Semântica de <c>observedAt</c>:</b> é o <c>statement_timestamp()</c> da instrução, isto é, o instante em que o servidor recebeu o comando.
+/// Em READ COMMITTED o snapshot da contagem é tomado <i>depois</i> do recebimento, então todo commit anterior a <c>observedAt</c> está contado;
+/// um commit entre o recebimento e o snapshot pode aparecer na contagem (conservador). Um relógio avaliado <i>depois</i> da agregação
+/// (<c>clock_timestamp()</c>) poderia anunciar um instante posterior ao snapshot e certificar um corte que a leitura não cobriu.
+/// <c>observedAt</c> não é tempo de commit nem garante incluir lançamentos posteriores ao snapshot.
+/// </para>
+/// </summary>
 public sealed class UnresolvedEventsQuery(IConsolidationConnectionFactory connections)
 {
     private const string Sql = """
         SELECT COUNT(*) FILTER (WHERE status IN (0, 2)),
                COUNT(*) FILTER (WHERE status = 2),
-               clock_timestamp()
+               statement_timestamp()
         FROM consolidation_outbox
         WHERE account_id = ANY(@ids)
         """;

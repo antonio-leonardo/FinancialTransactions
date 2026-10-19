@@ -138,6 +138,8 @@ Os prazos refletem `Timeout=5;Command Timeout=15` e um prazo de 2 s configurado 
 
 ### 4.2 Ensaio de carga
 
+> **Escopo:** este ensaio é do ciclo P04 (commit `4463e38`), anterior à Outbox e aos processos do consolidado diário. Não mede o consolidado nem o POST com a segunda escrita (a Outbox); não é evidência de P07. O ensaio de 50 req/s do consolidado está pendente (P08).
+
 Detalhes, método, ambiente e limites em [carga.md](carga.md). Fonte: *executor local* e *governança local* (P04, 19/10/2026; a governança repetiu o ensaio com os mesmos parâmetros). Duas execuções de 60 s medidos, 32 trabalhadores em laço fechado, banco com 100.000 movimentos pré-carregados em 400 contas:
 
 | Execução | Requisições medidas | Vazão (mistura de operações) | Erros técnicos | Reconciliação |
@@ -318,7 +320,7 @@ Fonte de cada item: as **adequações sugeridas** após a primeira entrega (ver 
 |---|---|---|---|---|---|
 | 1 | Independência dos lançamentos em relação ao consolidado diário | Processo e banco próprios para a consolidação; Outbox na transação do movimento; a escrita não conhece a projeção. Worker parado, projeção fora do ar e API do consolidado parada não impedem registrar, consultar a posição por instante nem a readiness da escrita | segunda instância do Worker e da API do consolidado (P08) | **executado e aprovado** nos cenários C1 a C5 (automatizados e sondagem contra processos reais), sem duas instâncias | seções 9.2, 9.4 e 9.5 |
 | 2 | Estratégia de processamento e recuperação da consolidação | Classes de falha (transitória, ambiente, evento), *backoff* de 1 s a 30 s, quarentena por marcação (5 tentativas), reentrega idempotente, bootstrap reconciliado por identidade e saúde com desarme | reprocessamento administrativo da quarentena, métricas, reverificação ampla da projeção viva e reconstrução de destino perdido (P08) | **parcial** | C4, C6a, C6b, C7, C9a a C9h, C12a, C12b |
-| 3 | Requisito de 50 req/s com no máximo 5% de perda, associando cada resultado ao cenário | nenhum ensaio do consolidado; o requisito está documentado como sugerido em [escopo.md](escopo.md) | ensaio do consolidado em cenário declarado (P08) | **proposto** | nenhuma (ensaio em P08) |
+| 3 | Requisito de 50 req/s com no máximo 5% de perda, associando cada resultado ao cenário | nenhum ensaio do consolidado; o requisito (orientações complementares) está registrado em [escopo.md](escopo.md) como **requisito**: o ensaio continua pendente (P08), mas a sua natureza não é rebaixada a sugestão | ensaio do consolidado em cenário declarado (P08) | **proposto** | nenhuma (ensaio em P08) |
 | 4 | Arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal) | pontos de falha parciais descritos em [arquitetura.md](arquitetura.md); **uma** instância de cada processo | `docs/alta-disponibilidade.md` e a escala horizontal (P09) | **proposto** | nenhuma (P09) |
 | 5 | Aderência ao enunciado, distinguindo obrigatório de hipótese | seção "Fontes e procedência" e rótulos "hipótese do projeto" / "decisão do responsável" em [escopo.md](escopo.md) e [arquitetura.md](arquitetura.md) | revisão final da aderência (P09) | **implementado** | [escopo.md](escopo.md) |
 
@@ -358,7 +360,7 @@ Outros testes do ciclo: contrato da API (`DayParameter_*`, `DayBoundary_*`, `Cus
 
 ### 9.3 Comandos e resultados
 
-Fonte: *executor local*, 19/10/2026, na solução. SDK 10.0.402. Quatro rodadas de `dotnet test` (duas de cada projeto), com TRX por projeto e rodada.
+Fonte: *executor local*, 19/10/2026, na solução, **sobre o código do commit `a055816`** (os resultados depois da rodada de correção estão na seção 9.7: 173 e 100 testes, 273 nomes). SDK 10.0.402. Quatro rodadas de `dotnet test` (duas de cada projeto), com TRX por projeto e rodada.
 
 | Etapa | Comando | Resultado |
 |---|---|---|
@@ -368,7 +370,7 @@ Fonte: *executor local*, 19/10/2026, na solução. SDK 10.0.402. Quatro rodadas 
 | Testes de integração (2 rodadas) | idem, `IntegrationTests` | `rc` 0; **98 de 98** aprovados nas duas (cerca de 48 s) |
 | Lista nominal | nomes do TRX | 271 nomes iguais nas duas rodadas; **os 137 nomes dos ciclos anteriores estão presentes**; 134 novos; nenhum ignorado |
 
-A CI **não** executou esta versão (seção 9.6).
+Execução remota (fonte: *leitura do auditor-master* do log da CI em 19/10/2026, não uma execução do executor): SHA `a055816243e29088f47c41d372f23178b4ae7512`, [run 39321900737](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39321900737) (número 9, tentativa 1, `push`, `completed/success`), job `build-and-test` 118297790062; Ubuntu 24.04.5, runner 2.337.0, SDK 10.0.402, dois serviços PostgreSQL 17.11; restore, build Release `-warnaserror` (11 assemblies, `0 Warning(s)`, `0 Error(s)`) e testes **173/173** (unidade) e **98/98** (integração). A CI **não** executou a sondagem contra processos reais, as mutações, o ensaio de carga nem o roteiro do README; esses resultados continuam sendo do executor (seções 9.4 e 9.5). A correção descrita na seção 9.7 é posterior a esse SHA e ainda não tem execução na CI.
 
 ### 9.4 Verificação de sensibilidade dos testes (mutações do executor)
 
@@ -386,6 +388,8 @@ Mutações compiláveis de poucas linhas, uma por vez, em cópia do arquivo de p
 | `pg_advisory_lock` bloqueante | C9h |
 | Marcador de `processed_events` fora da transação | C6a |
 | Coordenador que recaptura ignorando o registro de controle | C9c e C9d |
+| (rodada de correção) `observedAt` avaliado com `clock_timestamp()` depois da agregação | EX01 (reprova pela asserção do instante: `observedAt` posterior ao commit concorrente não contado) |
+| (rodada de correção) unlock incondicional, mesmo sem ter adquirido o lock | EX02 (reprova pela asserção de que nenhuma liberação de lock alheio foi tentada) |
 
 Uma primeira tentativa da mutação da reconciliação produziu SQL malformado (erro de escape no próprio *script* de mutação) e foi descartada; a mutação válida foi refeita. Não foram executadas por esta verificação: `attempts` incrementado em falha transitória (C4), readiness da escrita incluindo a projeção (C13) e a marcação de pertença em transação própria `READ COMMITTED`.
 
@@ -415,7 +419,7 @@ Limpeza: processos próprios encerrados pelo PID registrado; os quatro bancos re
 
 | Item | Situação |
 |---|---|
-| CI | O workflow foi alterado (segundo serviço PostgreSQL e variável de conexão administrativa), mas **não executou** esta versão. Os testes do consolidado têm esperas de tempo real e vão rodar em runner compartilhado: intermitência é possível e seria registrada. |
+| CI | Há uma execução bem-sucedida da versão `a055816` (seção 9.3, leitura do auditor-master). A correção da seção 9.7 ainda não tem execução na CI. Os testes do consolidado têm esperas de tempo real e rodam em runner compartilhado: intermitência é possível e seria registrada. O log da CI contém a mensagem do servidor `you don't own a lock of type ExclusiveLock`, compatível com o unlock sem posse do coordenador que perdeu a disputa; corrigido em 9.7. |
 | Consumidor único | Reserva durável, mais de um Worker ou de uma API do consolidado, reprocessamento administrativo da quarentena, métricas, reverificação ampla da projeção e reconstrução de destino perdido: **P08**. |
 | Carga do consolidado | 50 req/s com no máximo 5% de perda: **proposto**, sem ensaio. A meta de ≤ 2 s para a falha de dependência é hipótese do projeto, exercitada só para conexão recusada. |
 | Alta disponibilidade | **P09**. |
@@ -423,3 +427,17 @@ Limpeza: processos próprios encerrados pelo PID registrado; os quatro bancos re
 | Mutações | As não executadas estão listadas na seção 9.4. |
 | README | O passo a passo do consolidado no README (três processos, `--backfill`) foi **verificado pela sondagem** com os mesmos executáveis e variáveis, não por um roteiro de checkout novo: o `docker compose up -d --wait` e os `dotnet ef database update` contra os bancos de desenvolvimento **não** foram executados (apenas contra bancos descartáveis). O caminho `dotnet run` dos dois processos novos (perfil `http`, portas 5120 e 5110, `--backfill` com saída 2) foi exercitado com as connection strings apontando para uma porta fechada, sem tocar em nenhum banco: `live` 200 e `ready` 503 `Unhealthy` nos dois, e as portas liberadas depois. |
 | Diagramas | Os diagramas novos (componentes, sequência e estados) foram conferidos por leitura; a renderização no GitHub permanece pendente. |
+
+### 9.7 Rodada de correção pós-auditoria (P07-EX-01 a EX-03)
+
+Origem: parecer do auditor-master sobre o commit `a055816243e29088f47c41d372f23178b4ae7512`. A rodada partiu desse mesmo SHA, com árvore limpa e índice vazio, e **não** fez commit nem publicação. Fonte dos resultados abaixo: *executor local*, 19/10/2026; é execução do executor, não auditoria independente. O desenho foi preservado (contrato diário, bootstrap, ordem origem → projeção, C14 e lifetimes não mudaram).
+
+| Achado | Correção | Controle novo | Resultado |
+|---|---|---|---|
+| **EX-01** (P1): `observedAt` avaliado depois da agregação podia anunciar um corte posterior ao snapshot da contagem | `observedAt` passou a ser o `statement_timestamp()` da instrução de contagem (início da observação, anterior ou igual ao snapshot); a descrição foi ajustada em [arquitetura.md](arquitetura.md) (ADR-11) e no README | `EX01_ObservedAt_IsNotLaterThanTheSnapshot_ACommitDuringTheObservationIsNotCoveredByTheAnnouncedInstant`: num banco descartável, uma view de teste faz a **própria instrução SQL de produção** esperar por um lock consultivo **depois** do snapshot; confirmada a espera (`pg_stat_activity`: evento `Lock`/`advisory`), um commit concorrente é feito e o instante anterior ao `COMMIT` é lido; só então a barreira é liberada. Premissa asserida: a contagem não inclui o commit (0). Propriedade: `observedAt` não é posterior ao commit não contado | aprovado. Mutação com `clock_timestamp()` avaliado depois da agregação reprova **pela asserção do instante** (`observedAt` 21:29:48,0704680 posterior ao commit concorrente 21:29:48,0484860); uma primeira mutação reprovou por *timeout* do meu critério de localização da instrução e foi descartada como prova, o critério foi corrigido e a mutação refeita |
+| **EX-02** (P2): `pg_advisory_unlock` emitido por sessão que não adquiriu o lock | o coordenador guarda se adquiriu; só então libera (e registra se o servidor devolver falso); a sessão própria é descartada em todos os caminhos; disputa e código 3 preservados | `EX02_Coordinator_ThatDidNotAcquireTheLock_DoesNotUnlock_AndDisposesItsSession_TheOwnerKeepsTheLock`: o dono (outra sessão) mantém o lock; o coordenador sai com 3, não tenta liberar, o dono continua dono (mesmo `pid` em `pg_locks`) e o número de sessões do banco volta ao anterior; a execução seguinte sai com 0 e não deixa lock | aprovado. Mutação com unlock incondicional reprova pela asserção de que nenhuma liberação de lock alheio foi tentada |
+| **EX-03** (P2): documentação | seções 9.1, 9.3 e 9.6 deste documento (CI do SHA examinado, com a fonte); requisito de 50 req/s e 5% tratado como **requisito** (ensaio pendente em P08); notas de escopo em ADR-1, README, [carga.md](carga.md) e seção 4.2 (o ensaio é do ciclo P04, commit `4463e38`, anterior à Outbox e aos processos novos); ADR-13 corrigida: depois do primeiro sucesso o *backoff* volta a 1 s, e os 500 ms são a espera quando não há pendentes | n/a (documentação) | verificador de links, âncoras, diagramas e privacidade: ver o resultado no checkpoint da rodada |
+
+**Regressão (Release):** restore `rc` 0; build `-warnaserror` `rc` 0, `0 Warning(s)`, `0 Error(s)`; duas rodadas de cada projeto, `rc` 0: **173/173** (unidade) e **100/100** (integração), **273 nomes**, idênticos nas duas rodadas; os 271 nomes de `a055816` e os 137 de P06 estão presentes; os 2 novos são `EX01_*` e `EX02_*`. Nenhum teste existente foi removido ou enfraquecido.
+
+**Limites:** a CI não executou esta correção (o run 9 é anterior). O controle de EX-01 depende de uma view e de uma função criadas só no banco descartável do teste; a propriedade `statement_timestamp()` ≤ snapshot em READ COMMITTED vem da semântica do PostgreSQL e é exercitada (premissa e propriedade asseridas) nesse cenário, não demonstrada para toda intercalação possível. As mutações da seção 9.4 que o executor não realizou continuam não realizadas.
