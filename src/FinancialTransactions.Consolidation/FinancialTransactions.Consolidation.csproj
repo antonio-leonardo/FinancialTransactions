@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Núcleo da consolidação diária: projeção, aplicação idempotente, consumo da Outbox, bootstrap e consultas. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FinancialTransactions.Domain\FinancialTransactions.Domain.csproj" />
+    <ProjectReference Include="..\FinancialTransactions.Infrastructure\FinancialTransactions.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.13" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="FinancialTransactions.UnitTests" />
+    <InternalsVisibleTo Include="FinancialTransactions.IntegrationTests" />
+  </ItemGroup>
+
+</Project>

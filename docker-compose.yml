@@ -17,5 +17,24 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  # Banco próprio da consolidação diária (projeção). Instância separada da origem de propósito:
+  # a indisponibilidade de um não pode derrubar o outro.
+  consolidation-postgres:
+    image: postgres:17
+    container_name: financialtransactions-consolidation-postgres
+    environment:
+      POSTGRES_USER: ft
+      POSTGRES_PASSWORD: ft_local_dev_only
+      POSTGRES_DB: financialtransactions_consolidation
+    ports:
+      - "127.0.0.1:15433:5432"
+    volumes:
+      - ft_consolidation_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ft -d financialtransactions_consolidation"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 volumes:
   ft_pgdata:
+  ft_consolidation_pgdata:

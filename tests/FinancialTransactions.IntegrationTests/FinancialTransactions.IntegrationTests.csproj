@@ -19,6 +19,9 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FinancialTransactions.Api\FinancialTransactions.Api.csproj" />
     <ProjectReference Include="..\..\src\FinancialTransactions.Infrastructure\FinancialTransactions.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\FinancialTransactions.Consolidation\FinancialTransactions.Consolidation.csproj" />
+    <ProjectReference Include="..\..\src\FinancialTransactions.Consolidation.Worker\FinancialTransactions.Consolidation.Worker.csproj" />
+    <ProjectReference Include="..\..\src\FinancialTransactions.Consolidation.Api\FinancialTransactions.Consolidation.Api.csproj" />
   </ItemGroup>
 
 </Project>

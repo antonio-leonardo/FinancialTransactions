@@ -1,4 +1,5 @@
 using FinancialTransactions.Api.Auth;
+using FinancialTransactions.Auth;
 using FinancialTransactions.Api.Http;
 using FinancialTransactions.Domain;
 using System.Security.Cryptography;
@@ -103,6 +104,9 @@ public sealed class RegisterMovementHandler(
         await using (var transaction = await db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false))
         {
             db.Movements.Add(movement);
+            // Outbox na mesma transação e no mesmo SaveChanges do movimento: ou os dois existem, ou nenhum. Replay (23505)
+            // e falha antes do commit revertem os dois juntos; a consolidação nunca vê um fato que não foi confirmado.
+            db.OutboxEvents.Add(OutboxEvent.ForMovement(movement, account.CustomerId, now));
             try
             {
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

@@ -1,6 +1,6 @@
 using System.Security.Claims;
 
-namespace FinancialTransactions.Api.Auth;
+namespace FinancialTransactions.Auth;
 
 /// <summary>Escopo de acesso vem da claim <c>customer_id</c> do token, nunca do corpo ou da query (H11).</summary>
 public static class CustomerScope

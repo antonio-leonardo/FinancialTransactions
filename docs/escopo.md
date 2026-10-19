@@ -17,9 +17,31 @@ Os seis requisitos são independentes entre si e cada um é eliminatório:
 
 ## Procedência das hipóteses
 
-O enunciado dá liberdade de estrutura e tecnologia e não determina moeda, SDK, banco de dados, mecanismo de autenticação nem política de saldo. As hipóteses abaixo foram propostas pela governança do projeto em 18/10/2026 para tornar o trabalho determinístico. Estado de aprovação: aprovadas pelo responsável do projeto em 18/10/2026. Qualquer alteração posterior exige revisão deste documento.
+O enunciado dá liberdade de estrutura e tecnologia e não determina moeda, SDK, banco de dados, mecanismo de autenticação nem política de saldo. As hipóteses abaixo foram propostas pela governança do projeto em 18/10/2026 para tornar o trabalho determinístico. Estado de aprovação: aprovadas pelo responsável do projeto em 18/10/2026. Qualquer alteração posterior exige revisão deste documento. Em 19/10/2026 o responsável do projeto aprovou a substituição de H12 e a inclusão de H15 (ciclo P07); H1 a H11 e H13 a H14 não mudaram.
 
-## Hipóteses H1 a H14
+## Fontes e procedência
+
+Além do enunciado, o projeto recebeu **orientações complementares** e, depois da primeira entrega, cinco **adequações sugeridas** por um arquiteto avaliador. O que segue está em redação própria e distingue o que foi pedido do que é escolha do projeto.
+
+**Orientações complementares (pedidos ou sugestões de terceiros):**
+
+- *Requisito:* o registro de lançamentos tem de continuar disponível quando o serviço do consolidado diário estiver fora do ar. Meios apontados como possíveis, sem exigir nenhum: comunicação assíncrona, mensageria, Outbox, nova tentativa com reprocessamento, idempotência e tratamento de falhas.
+- *Requisito:* o consolidado diário deve aguentar picos de 50 requisições por segundo com perda de no máximo 5%. Estratégias citadas como possíveis: cache, processamento assíncrono, escala horizontal, índices e testes de carga. A demonstração deve ser feita por teste sempre que der.
+- *Segurança:* autenticação e autorização, proteção dos endpoints, validação de entradas, controle de acesso e cuidado com informação sensível.
+- *Testes:* além das regras de negócio, falha de serviços, reprocessamento, idempotência, integração, carga e desempenho.
+- *Documentação:* README, diagrama da arquitetura, principais fluxos, decisões com seus motivos, requisitos não funcionais, trade-offs e evoluções.
+
+**Adequações sugeridas após a primeira entrega** (estado por item em [verificacao.md](verificacao.md)):
+
+1. mostrar que os lançamentos são independentes do consolidado diário, por Worker, serviço separado ou outra solução que se justifique;
+2. definir a estratégia de processamento e de recuperação da consolidação diante de falhas, atrasos e reprocessamento;
+3. documentar o requisito de 50 req/s com 5% de perda, ligando cada resultado ao cenário em que foi medido;
+4. descrever uma arquitetura de alta disponibilidade, com pontos de falha, recuperação e escala horizontal;
+5. revisar a aderência ao enunciado, separando o que é obrigatório do que é hipótese do projeto.
+
+**Escolhas do projeto, não pedidas por ninguém:** as hipóteses H1 a H15 e os números de laboratório (limites de valor, metas de carga, prazo de resposta do consolidado, dia de negócio em fuso nomeado). Onde este documento fala em "hipótese do projeto", o contratante não a exigiu.
+
+## Hipóteses H1 a H15
 
 | # | Tema | Hipótese |
 |---|---|---|
@@ -34,9 +56,10 @@ O enunciado dá liberdade de estrutura e tecnologia e não determina moeda, SDK,
 | H9 | Informação tardia | Admitida: movimento com `effectiveAt` no passado (respeitando H5) pode ser registrado depois; a posição histórica passa a refletir o conhecimento atual. Não há consulta "como se sabia em k". |
 | H10 | Repetição | Header obrigatório `Idempotency-Key`. Identidade = (conta, chave). Conteúdo normalizado = fingerprint SHA-256 de tipo, valor com duas casas invariantes, `effectiveAt` em UTC e descrição. Protocolo em P01: inserir o movimento com a identidade na mesma linha e transação; conflito UNIQUE → reler o existente; fingerprint igual → responder o mesmo movimento; diferente → 422 sem efeito. Autorização é verificada também na repetição. Retenção: sem expiração neste recorte. |
 | H11 | Segurança | JWT bearer com emissor local de desenvolvimento, chave simétrica fornecida por variável de ambiente ou user-secrets, nunca em arquivo versionado. Token carrega o escopo de cliente. Toda rota exige token e autorização por recurso. |
-| H12 | Arquitetura | Uma API ASP.NET Core (Minimal APIs), EF Core com Npgsql, migrations, posição calculada por agregação no banco. Sem broker, Outbox, cache, Aspire ou microsserviços. |
+| H12 | Arquitetura | **Substituída em 19/10/2026 (ciclo P07, decisão D1 do responsável do projeto).** Redação original, mantida para o histórico: uma API ASP.NET Core (Minimal APIs), EF Core com Npgsql, migrations, posição calculada por agregação no banco; sem broker, Outbox, cache, Aspire ou microsserviços. **Redação vigente:** a escrita de lançamentos e a posição por instante continuam na API de lançamentos, com agregação no banco de origem. A consolidação diária roda em processos próprios (Worker e API do consolidado) com banco próprio, alimentados por uma Outbox transacional gravada na origem. Continuam fora: broker de mensagens, cache, Aspire e orquestração de containers. |
 | H13 | Stack | .NET 10 com SDK fixado em `global.json`. PostgreSQL 17 em container Docker, porta publicada no host em `127.0.0.1:15432`. xUnit no runner **VSTest**. |
 | H14 | Estados | Use sempre: proposto; implementado; executado e aprovado; reprovado; bloqueado/não verificado. |
+| H15 | Consolidado diário | **Decisão do responsável do projeto em 19/10/2026 (D2); hipótese do projeto, não requisito do contratante.** Contrato na seção "Contrato do consolidado diário", abaixo. |
 
 ## Contrato financeiro e temporal
 
@@ -53,7 +76,7 @@ Toda conta nasce com saldo zero em `openedAt`. Consultar uma conta antes da aber
 - câmbio e multimoeda;
 - autorização de limite;
 - partidas dobradas;
-- mensageria;
+- broker de mensagens (a comunicação assíncrona do consolidado usa trabalho durável no banco; broker é alternativa documentada, não implementada);
 - event sourcing;
 - CQRS distribuído;
 - front-end;
@@ -133,6 +156,33 @@ Registradas aqui porque tratam da manutenção do workflow e da forma de aceita�
 - **Aceitação por checkout novo:** a versão candidata será aceita a partir de um clone novo da URL pública, em contexto sem credencial, com o roteiro de aceitação do guia, controles negativos e o passo a passo do README. O resultado entra em [verificacao.md](verificacao.md).
 - **Redação de "Objetivo":** o parágrafo foi reescrito com palavras próprias, preservando a substância (o que o sistema registra, o que consulta e em que instante).
 
+## Contrato do consolidado diário (H15, ciclo P07)
+
+Decisão do responsável do projeto em 19/10/2026; **não** é requisito do contratante. Estado: **implementado; executado e aprovado** nos cenários C1 a C15 do ciclo P07 (execução local do executor, 19/10/2026; ver [verificacao.md](verificacao.md), seção 9). A CI ainda não executou esta versão.
+
+- **Dia de negócio:** data civil do `effectiveAt` na zona nomeada `America/Sao_Paulo`, não um offset fixo. Início às 00:00 local; fim exclusivo às 00:00 local do dia seguinte. Com offset −03, `2026-09-02T02:59:59.999999Z` pertence a 01/09 e `2026-09-02T03:00:00Z` a 02/09.
+- **Contas no dia D:** entram as de `openedAt` anterior ao fim exclusivo de D. Consulta por conta fora disso: 422 `historico_insuficiente`; por cliente, essas contas vão para `excludedAccounts`; nenhuma incluída: 422.
+- **Parâmetro `day`:** `YYYY-MM-DD` estrito; outra forma ou dia futuro: 422 `validation_error`. O dia corrente é `open`; os anteriores são `closed` no calendário e ainda podem receber informação tardia (H9).
+- **Valores:** `credits`, `debits`, `net` e `movementCount` são do dia; `closingBalance` é a soma de `net` dos dias até D. Informação tardia muda a linha do dia do `effectiveAt` e, por derivação, o `closingBalance` dos dias seguintes; as linhas dos dias seguintes não mudam.
+- **Estado de atualização, conservador e datado:** a resposta informa `unresolvedEvents` (eventos das contas do recorte, de qualquer dia, ainda não confirmados ou em quarentena), `failedEvents`, `observedAt` e `freshness` (`complete`, `stale` ou `unknown`). `complete` afirma só que, em `observedAt`, não havia eventos não confirmados para o recorte; nunca é devolvido com quarentena no recorte.
+- **Disponibilidade:** o consolidado responde 503 `consolidation_not_ready` até a carga inicial terminar e 503 `dependency_unavailable` quando origem ou projeção não respondem, sem nunca devolver saldo substituto.
+
+## Decisões do ciclo P07
+
+Registradas aqui porque afetam o contrato observável e a operação. H12 foi substituída e H15 acrescentada por decisão do responsável do projeto em 19/10/2026; H1 a H11 e H13 a H14 não mudaram. Nada abaixo é requisito do contratante.
+
+- **Arquitetura (D1):** a escrita e a posição por instante continuam na API de lançamentos; o consolidado diário vive em Worker e API próprios, com banco próprio, alimentados por uma Outbox transacional. Sem broker; broker é alternativa documentada (ADR-10).
+- **Dia de negócio (D2):** data civil do `effectiveAt` em `America/Sao_Paulo` (zona nomeada), com fim exclusivo à meia-noite local. Depende dos dados de fuso da máquina; a comparação medida entre o .NET e o PostgreSQL e o seu limite estão em [arquitetura.md](arquitetura.md), ADR-12.
+- **Posição por instante (D7):** mantida sem mudança de contrato.
+- **Consumidor único e sequencial (declarado):** não há reserva durável nem segunda instância do Worker ou da API do consolidado; isso é o ciclo seguinte.
+- **Estado de atualização conservador:** a resposta do consolidado informa `observedAt`, `unresolvedEvents`, `failedEvents` e `freshness`, e nunca afirma completude que não comprovou (ADR-11).
+- **Orçamento da API do consolidado:** 1,5 s por requisição e `Timeout=1;Command Timeout=1`; resposta de falha em até 2 s é **hipótese do projeto**, exercitada só para conexão recusada.
+- **Classes de falha do consumidor:** transitória, ambiente e evento (ADR-13). Só defeito do evento leva à quarentena (5 tentativas); falha de ambiente nunca.
+- **Bootstrap com a escrita ativa:** conjunto inicial por identidade, registro de controle na origem, ativação idempotente no destino, fases que só avançam (ADR em [arquitetura.md](arquitetura.md), seção "Bootstrap").
+- **Extração do projeto `Auth`:** o JWT local e o escopo por cliente saíram da API de lançamentos para uma biblioteca sem referência a outros projetos; `AccountAccess` (acesso a dados) ficou na API.
+- **Classificação de indisponibilidade única:** `ApiExceptionHandler.IsDependencyUnavailable` delega a `Infrastructure/DependencyFailure`, usada também pelo Worker e pela API do consolidado. Comportamento da API de lançamentos inalterado (os cinco testes de unidade existentes continuam passando).
+- **Ajuste de fixture:** a limpeza dos testes da API de lançamentos passou a apagar também a Outbox por conta, para que os eventos de um teste não contaminem os do seguinte.
+
 ## Cenários da matriz e aplicabilidade
 
 Estados segundo H14. "Executado e aprovado" refere-se à execução local registrada no checkpoint do ciclo, não a CI.
@@ -152,6 +202,6 @@ Estados segundo H14. "Executado e aprovado" refere-se à execução local regist
 | T11 | Autenticação e autorização | executado e aprovado | P01 (sem token, outro cliente, inclusive na repetição) e P02 (T11c: expirado, audiência errada, sem `customer_id`, outra chave) |
 | T12 | Precisão e seleção | executado e aprovado | P01 e P02: 100 × 0,01 = 1,00; contas e clientes não vazam; escala de 3 casas rejeitada |
 | T13 | Indisponibilidade e recuperação | executado e aprovado | P03: banco inalcançável → `503 dependency_unavailable` em ~2 s, nunca saldo zero (T13a, T13b); readiness `503`/liveness `200` com o banco fora e readiness `200` com o banco disponível (T13c, T13d); sondas anônimas, API não (`Health_IsAnonymous_ApiIsNot`); limite de corpo; logs sem segredos. Sondagem de reinício do PostgreSQL contra Kestrel real: dado confirmado sobrevive, operações voltam, replay e chave nova se comportam como esperado |
-| T14 | Correção e reconciliação | parcial: reconciliação pós-carga executada (identidades e somas) | P04: após a carga, conjunto de ids, campos por linha e soma assinada por conta conferem com o que a ferramenta registrou como aceito, nas duas execuções. Correção de movimentos continua fora de escopo (sem estorno; a posição é derivada e a identidade de cada movimento é preservada pela UNIQUE) |
-| T15 | Mensageria | não aplicável | H12: sem broker nem Outbox |
+| T14 | Correção e reconciliação | parcial: reconciliação pós-carga executada (identidades e somas); reconciliação do consolidado diário (por conta, dia e identidade) **executada** no bootstrap do ciclo P07 (C2, C9a a C9h) | P04: após a carga, conjunto de ids, campos por linha e soma assinada por conta conferem com o que a ferramenta registrou como aceito, nas duas execuções. Correção de movimentos continua fora de escopo (sem estorno; a posição é derivada e a identidade de cada movimento é preservada pela UNIQUE) |
+| T15 | Mensageria | **executado e aprovado** (ciclo P07, execução local; era "não aplicável" até P06 por H12, que vedava broker e Outbox) | Comunicação assíncrona por trabalho durável no banco, sem broker; broker é alternativa documentada (ADR-10 em [arquitetura.md](arquitetura.md)). Cenários C1 a C15, mais a sondagem contra processos reais, em [verificacao.md](verificacao.md), seção 9 |
 | T16 | Carga e aceitação | carga executada; CI executada com sucesso em `abcdf19c073dc95505010a593126248dc2bcc79a` (run `39201091893`); aceitação em cópia limpa em P06 | P04: duas execuções de 60 s com 32 trabalhadores contra API e PostgreSQL reais, zero erro técnico, reconciliação exata (ver [carga.md](carga.md)). Compilação limpa e testes executados em P04. A CI do commit `abcdf19` executou com sucesso (ver [verificacao.md](verificacao.md)); a aceitação em cópia limpa fica para P06 |

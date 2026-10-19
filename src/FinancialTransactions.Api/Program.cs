@@ -1,11 +1,10 @@
 using FinancialTransactions.Api.Auth;
+using FinancialTransactions.Auth;
 using FinancialTransactions.Api.Endpoints;
 using FinancialTransactions.Api.Health;
 using FinancialTransactions.Api.Http;
 using FinancialTransactions.Api.Movements;
 using FinancialTransactions.Infrastructure;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
 
 const string ConnectionStringName = DatabaseReadinessCheck.ConnectionStringName;
 
@@ -23,44 +22,7 @@ builder.Services.AddSingleton<IRegisterMovementFailurePoints, NoFailurePoints>()
 builder.Services.AddScoped<AccountAccess>();
 builder.Services.AddScoped<RegisterMovementHandler>();
 
-builder.Services
-    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer();
-builder.Services
-    .AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
-    .Configure<IConfiguration>((options, configuration) =>
-    {
-        var signingKey = AuthDefaults.TryReadSigningKey(configuration[AuthDefaults.SigningKeyConfigurationPath], out _);
-        options.MapInboundClaims = false;
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidIssuer = AuthDefaults.Issuer,
-            ValidateAudience = true,
-            ValidAudience = AuthDefaults.Audience,
-            ValidateIssuerSigningKey = true,
-            IssuerSigningKey = signingKey is null ? null : new SymmetricSecurityKey(signingKey),
-            ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
-            ValidateLifetime = true,
-            RequireExpirationTime = true,
-            ClockSkew = TimeSpan.FromMinutes(1),
-            NameClaimType = "sub",
-        };
-        options.Events = new JwtBearerEvents
-        {
-            // Token válido mas sem escopo de cliente utilizável é tratado como não autenticado (401).
-            OnTokenValidated = context =>
-            {
-                if (!CustomerScope.TryGet(context.Principal, out _))
-                {
-                    context.Fail("Token sem claim customer_id válida.");
-                }
-
-                return Task.CompletedTask;
-            },
-        };
-    });
-builder.Services.AddAuthorization();
+builder.Services.AddFinancialTransactionsJwt();
 
 builder.Services.AddHealthChecks()
     .AddCheck<DatabaseReadinessCheck>("db", tags: [HealthEndpoints.ReadyTag]);

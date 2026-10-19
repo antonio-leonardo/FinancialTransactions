@@ -1,6 +1,6 @@
 # FinancialTransactions
 
-Sistema de registro de movimentações financeiras (créditos e débitos) em contas de clientes, com consulta da posição consolidada por conta e por cliente em um instante (`asOf`). API ASP.NET Core (Minimal APIs) sobre PostgreSQL, com EF Core, idempotência por chave e autenticação JWT local. O escopo e as hipóteses estão em [docs/escopo.md](docs/escopo.md).
+Sistema de registro de movimentações financeiras (créditos e débitos) em contas de clientes, com consulta da posição consolidada por conta e por cliente em um instante (`asOf`) e **consolidado diário** por conta e por cliente. São **três processos** (API de lançamentos, Worker de consolidação e API do consolidado) e **dois bancos PostgreSQL**: o registro de lançamentos não depende de nada do consolidado. ASP.NET Core (Minimal APIs), EF Core, idempotência por chave e autenticação JWT local. O escopo e as hipóteses estão em [docs/escopo.md](docs/escopo.md); os componentes e as decisões, em [docs/arquitetura.md](docs/arquitetura.md).
 
 ## O que está implementado
 
@@ -17,14 +17,24 @@ Implementado e verificado localmente (a correspondência com os testes e os resu
 9. **Logs da aplicação** sem segredos, corpo de requisição nem connection string.
 10. **Ensaio de carga** local (duas execuções, 60 s medidos cada, zero erro técnico) com reconciliação do banco e análise dos planos das consultas de posição, em [docs/carga.md](docs/carga.md); não representa produção.
 
-O estado da CI está na seção [CI](#ci). A matriz de cenários e a aplicabilidade de cada um estão em [docs/escopo.md](docs/escopo.md).
+Consolidado diário (ciclo P07; hipóteses do projeto, não do contratante, em [docs/escopo.md](docs/escopo.md) H15):
+
+11. **Independência:** cada movimento grava, **na mesma transação**, um evento numa Outbox da origem. Worker parado, banco de consolidação fora do ar ou API do consolidado parada **não impedem** registrar movimentos, consultar a posição por instante nem a readiness da API de lançamentos (cenários C1 a C5 e C13).
+12. **Consolidado por dia de negócio** (`America/Sao_Paulo`): créditos, débitos, líquido, contagem e fechamento acumulado por conta e por cliente, lidos de uma projeção própria que um Worker atualiza de forma idempotente (marcador e soma na mesma transação; reentrega não soma de novo).
+13. **A resposta nunca afirma completude que não comprovou:** `freshness` (`complete`, `stale` ou `unknown`), `unresolvedEvents`, `failedEvents` e `observedAt` descrevem o instante em que a origem foi lida (ver "Consolidado diário" abaixo).
+14. **Recuperação sem intervenção:** falhas transitórias e de ambiente não perdem nem duplicam eventos e entram em *backoff*; só defeito do próprio evento leva à quarentena (cinco tentativas).
+15. **Carga inicial (bootstrap) com a escrita ativa:** conjunto finito por identidade, capturado numa visão consistente, aplicado e reconciliado nos dois bancos antes de a API do consolidado responder.
+
+O estado da CI está na seção [CI](#ci). A matriz de cenários e a aplicabilidade de cada um estão em [docs/escopo.md](docs/escopo.md); o estado das adequações sugeridas, em [docs/verificacao.md](docs/verificacao.md).
 
 ## O que não está implementado
 
 - cache e posição materializada (decisão registrada com condição de revisão em [docs/carga.md](docs/carga.md));
 - correção ou estorno de movimentos;
 - abertura de contas e clientes por API (os cadastros vêm da migration);
-- publicação de eventos.
+- broker de mensagens e publicação para consumidores externos (a Outbox serve só à consolidação interna; broker é alternativa documentada em [docs/arquitetura.md](docs/arquitetura.md), ADR-10);
+- **consumidor único:** não há reserva durável nem mais de um Worker ou de uma API do consolidado, reprocessamento administrativo da quarentena, métricas, reverificação ampla da projeção nem ensaio dos 50 req/s do consolidado;
+- arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal).
 
 Propostas de evolução ficam separadas do que está implementado, em [docs/arquitetura.md](docs/arquitetura.md).
 
@@ -47,19 +57,26 @@ cd FinancialTransactions
 
 Os comandos seguintes são executados na raiz do repositório clonado.
 
-## 2. Subir o banco
+## 2. Subir os bancos
 
 ```powershell
 docker compose up -d --wait
 ```
 
-PostgreSQL 17 publicado em `127.0.0.1:15432`, banco `financialtransactions`, usuário `ft`, senha `ft_local_dev_only` (credencial sintética de laboratório, visível em `docker-compose.yml` e em `appsettings.Development.json`). `appsettings.json` não traz connection string; fora do ambiente `Development`, informe `ConnectionStrings__FinancialTransactions` por variável de ambiente ou user-secrets.
+Dois PostgreSQL 17, instâncias separadas de propósito (a queda de um não derruba o outro):
+
+| Serviço | Container | Porta no host | Banco | Papel |
+|---|---|---|---|---|
+| `postgres` | `financialtransactions-postgres` | `127.0.0.1:15432` | `financialtransactions` | **origem**: movimentos, contas e a Outbox |
+| `consolidation-postgres` | `financialtransactions-consolidation-postgres` | `127.0.0.1:15433` | `financialtransactions_consolidation` | **projeção** do consolidado diário |
+
+Usuário `ft`, senha `ft_local_dev_only` nos dois (credencial sintética de laboratório, visível em `docker-compose.yml` e nos `appsettings.Development.json`). `appsettings.json` não traz connection string; fora do ambiente `Development`, informe por variável de ambiente (com o prefixo `FT__`) `FT__ConnectionStrings__FinancialTransactions` (origem) e, nos processos do consolidado, também `FT__ConnectionStrings__Consolidation` (projeção). Os processos do consolidado recusam iniciar se uma das duas estiver ausente, inválida ou se forem iguais.
 
 A connection string de desenvolvimento termina em `Timeout=5;Command Timeout=15` (segundos para abrir a conexão e para executar um comando). Use os mesmos parâmetros em qualquer ambiente: sem eles, uma dependência indisponível seguraria a requisição por mais tempo do que o contrato de 503 promete (ver "Indisponibilidade" abaixo).
 
 ## 3. Gerar e exportar a chave de assinatura do JWT
 
-A API recusa iniciar sem `Auth:SigningKey` com pelo menos 32 bytes. A chave nunca fica em arquivo versionado.
+As duas APIs recusam iniciar sem `Auth:SigningKey` com pelo menos 32 bytes (a **mesma** chave nas duas, para que um token valha em ambas). A chave nunca fica em arquivo versionado.
 
 ```powershell
 $key = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
@@ -78,7 +95,10 @@ User-secrets só são lidos no ambiente `Development` (perfil `http` do `dotnet 
 
 ```powershell
 dotnet tool restore
-dotnet ef database update --project src/FinancialTransactions.Infrastructure --startup-project src/FinancialTransactions.Api
+# Origem: InitialSchema (com o seed) e AddConsolidationOutbox (Outbox e registro de controle da captura)
+dotnet ef database update --context FinancialTransactionsDbContext --project src/FinancialTransactions.Infrastructure --startup-project src/FinancialTransactions.Api
+# Projeção: ConsolidationSchema
+dotnet ef database update --context ConsolidationDbContext --project src/FinancialTransactions.Consolidation --startup-project src/FinancialTransactions.Consolidation.Worker
 ```
 
 A migration `InitialSchema` cria `customers`, `accounts` e `movements` e semeia dois clientes e três contas (nenhum movimento, nenhum dado pessoal):
@@ -91,15 +111,35 @@ A migration `InitialSchema` cria `customers`, `accounts` e `movements` e semeia 
 | Conta A2 | `aaaaaaa2-0000-0000-0000-000000000002` | cliente A, BRL, aberta em `2026-03-01T00:00:00Z` |
 | Conta B1 | `bbbbbbb1-0000-0000-0000-000000000001` | cliente B, BRL, aberta em `2026-02-01T00:00:00Z` |
 
-Migrations não são aplicadas no startup da API.
+`AddConsolidationOutbox` acrescenta `consolidation_outbox` e `consolidation_bootstrap_capture` à origem; `ConsolidationSchema` cria `daily_account_consolidation`, `processed_events` e `consolidation_bootstrap` na projeção. Migrations não são aplicadas no startup de nenhum processo.
 
-## 5. Executar a API
+## 5. Executar os processos
+
+São três processos, cada um num terminal. A variável `FT__Auth__SigningKey` precisa estar definida em cada sessão que executa uma API. O perfil `http` de cada projeto usa o ambiente `Development` (connection strings de desenvolvimento em `appsettings.Development.json`).
+
+**Ordem.** A API de lançamentos com a Outbox sobe **antes** do coordenador do bootstrap (não pode haver outro escritor sem Outbox). Depois do coordenador, suba o Worker e, por último, a API do consolidado.
 
 ```powershell
+# Terminal 1 - API de lançamentos, http://localhost:5100
 dotnet run --project src/FinancialTransactions.Api
+
+# Terminal 2 - coordenador do bootstrap (termina com código de saída; ver abaixo)
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --backfill
+
+# Terminal 2 (depois do coordenador) - Worker em modo serviço, http://127.0.0.1:5120
+dotnet run --project src/FinancialTransactions.Consolidation.Worker
+
+# Terminal 3 - API do consolidado, http://127.0.0.1:5110
+dotnet run --project src/FinancialTransactions.Consolidation.Api
 ```
 
-Perfil `http` em `http://localhost:5100` (ambiente `Development`). A variável `FT__Auth__SigningKey` precisa estar definida na sessão que executa a API. O `dotnet run` ocupa o terminal: gere o token e faça as chamadas das seções 6 e 7 em **outro terminal**, com a mesma `FT__Auth__SigningKey` exportada nele.
+`dotnet run` ocupa o terminal: gere o token e faça as chamadas das seções 6 e 7 em **outro terminal**, com a mesma `FT__Auth__SigningKey` exportada nele.
+
+**Coordenador (`--backfill`).** Captura o conjunto inicial de movimentos (os que já existiam, mais os eventos online anteriores), registra a captura na origem e ativa o destino. Nunca consome eventos e não espera pelo consumo; pode ser reexecutado sem risco. Códigos de saída: `0` ativação feita, ou nada a fazer (conjunto "em andamento" ou "concluído"); `2` origem ou projeção inalcançável, ou configuração inválida; `3` outro coordenador em execução; `4` descritores divergentes ou projeção incoerente (nada foi alterado); `5` resultado do commit da captura desconhecido (a reexecução decide pelo registro de controle).
+
+**Worker (serviço).** É o único consumidor. Sem bootstrap ativado ele **espera sem consumir** (`/health/ready` responde `503 {"status":"Degraded"}`); em `loading` aplica só o conjunto inicial e o reconcilia contra a origem; em `live` aplica a fila inteira. A fase só avança (`loading` para `live`), nunca volta. A API de lançamentos nunca é pausada nem afetada por nenhum desses estados.
+
+**API do consolidado.** Responde `503 consolidation_not_ready` até a fase chegar a `live`.
 
 ## 6. Gerar um token local
 
@@ -107,7 +147,7 @@ Perfil `http` em `http://localhost:5100` (ambiente `Development`). A variável `
 $token = dotnet run --project tools/FinancialTransactions.DevToken -- --customer 11111111-1111-1111-1111-111111111111 --minutes 60
 ```
 
-A ferramenta lê a chave de `FT__Auth__SigningKey` (ou `--key`) e emite um JWT HS256 com `iss=financialtransactions-dev`, `aud=financialtransactions-api`, `sub`, `customer_id` e `exp`. Sem chave, sai com código 2. A claim `customer_id` define o escopo: contas e clientes de outro escopo respondem 404.
+A ferramenta lê a chave de `FT__Auth__SigningKey` (ou `--key`) e emite um JWT HS256 com `iss=financialtransactions-dev`, `aud=financialtransactions-api`, `sub`, `customer_id` e `exp`. Sem chave, sai com código 2. A claim `customer_id` define o escopo: contas e clientes de outro escopo respondem 404. O mesmo token vale nas duas APIs (mesma chave, mesmo emissor e audiência).
 
 ## 7. Exemplos
 
@@ -143,6 +183,56 @@ Invoke-RestMethod -Method Post -SkipHttpErrorCheck -Uri "http://localhost:5100/a
 
 Para repetir um POST com a mesma `Idempotency-Key`, reenvie os campos da requisição original, **inclusive `description`**. O instante pode ser enviado na forma UTC com até seis casas fracionárias devolvida pela resposta. A resposta sozinha não permite reconstruir uma requisição que tinha descrição, porque a resposta não traz `description` e ela entra no fingerprint. Repetir com a mesma chave e o mesmo conteúdo devolve `200` com o mesmo `movementId`; a mesma chave com conteúdo diferente devolve `422 idempotency_key_conflict` sem efeito.
 
+### Consolidado diário
+
+Depois de o Worker aplicar os eventos, o consolidado do dia de negócio (`America/Sao_Paulo`) fica disponível na **API do consolidado** (porta 5110, mesmo token):
+
+```powershell
+$c = 'http://127.0.0.1:5110'
+
+# Consolidado da conta A1 em 01/09/2026: créditos, débitos, líquido, contagem e fechamento acumulado até o dia
+Invoke-RestMethod -Uri "$c/api/v1/accounts/$a1/consolidation/daily?day=2026-09-01" -Headers $h
+
+# Consolidado do cliente A no mesmo dia (soma das contas incluídas; accounts[] e excludedAccounts[])
+Invoke-RestMethod -Uri "$c/api/v1/customers/11111111-1111-1111-1111-111111111111/consolidation/daily?day=2026-09-01" -Headers $h
+```
+
+Resposta real da conta A1 no dia 2026-09-01, capturada na sondagem do ciclo P07 contra os processos reais (depois de o Worker aplicar, nesse banco descartável, um crédito de 10,00 e um débito de 4,00 daquele dia; sem movimentos anteriores):
+
+```json
+{
+  "accountId": "aaaaaaa1-0000-0000-0000-000000000001",
+  "day": "2026-09-01",
+  "businessTimeZone": "America/Sao_Paulo",
+  "dayStatus": "closed",
+  "currency": "BRL",
+  "credits": 10.00,
+  "debits": 4.00,
+  "net": 6.00,
+  "movementCount": 2,
+  "closingBalance": 6.00,
+  "maxAppliedSequence": 2,
+  "observedAt": "2026-10-19T19:27:02.105834+00:00",
+  "unresolvedEvents": 0,
+  "failedEvents": 0,
+  "stale": false,
+  "freshness": "complete"
+}
+```
+
+(`observedAt` e `maxAppliedSequence` dependem do momento e do histórico do seu banco. A semântica de cada campo está abaixo.)
+
+**O que cada campo afirma.** `credits`, `debits`, `net` e `movementCount` são **do dia**; `closingBalance` é a soma do `net` de todos os dias até o dia consultado. `dayStatus` é `open` para o dia corrente e `closed` para os anteriores (fechado no calendário: ainda pode receber informação tardia, H9). Uma informação tardia altera a linha do dia do `effectiveAt` e, por derivação, o `closingBalance` dos dias seguintes; as linhas dos dias seguintes não mudam. Contas abertas depois do fim do dia ficam em `excludedAccounts` (rota do cliente) ou dão `422 historico_insuficiente` (rota da conta).
+
+**Estado de atualização (conservador e datado).** A API lê primeiro a origem e só depois abre a consulta à projeção:
+
+- `observedAt`: o instante, na origem, em que os eventos foram contados.
+- `unresolvedEvents`: eventos das contas do recorte, **de qualquer dia**, ainda não confirmados (pendentes) ou em quarentena. `failedEvents`: os em quarentena.
+- `freshness: "complete"` afirma apenas que, em `observedAt`, **não havia eventos não confirmados** para o recorte; o corpo reflete a projeção lida depois desse instante, e lançamentos posteriores a `observedAt` podem não constar. É sempre `stale` com quarentena no recorte.
+- `freshness: "stale"` (`stale: true`): havia eventos não confirmados (conservador: um evento já aplicado e ainda não confirmado conta como não resolvido).
+- `freshness: "unknown"`: a leitura da origem falhou depois da autorização e a projeção ainda pôde ser lida; `unresolvedEvents`, `failedEvents`, `stale` e `observedAt` vêm nulos.
+- `maxAppliedSequence` é o **máximo observado** da sequência aplicada nas contas do recorte, não uma fronteira de completude.
+
 ### Contrato
 
 Prefixo `/api/v1`; todas as rotas de negócio exigem `Authorization: Bearer <jwt>`. Erros são `ProblemDetails` com a extensão `code`.
@@ -153,6 +243,8 @@ Prefixo `/api/v1`; todas as rotas de negócio exigem `Authorization: Bearer <jwt
 | `GET /accounts/{accountId}/movements/{movementId}` | | `200` mesmo corpo; `404` |
 | `GET /accounts/{accountId}/position?asOf=` | obrigatório | `200 { accountId, asOf, currency, balance, movementCount }` |
 | `GET /customers/{customerId}/position?asOf=` | obrigatório | `200 { customerId, asOf, currency, balance, accounts: [{ accountId, balance, movementCount }], excludedAccounts: [{ accountId, openedAt }] }` |
+| `GET /accounts/{accountId}/consolidation/daily?day=` (API do consolidado, :5110) | `day` obrigatório, `YYYY-MM-DD` estrito; não pode ser futuro | `200 { accountId, day, businessTimeZone, dayStatus, currency, credits, debits, net, movementCount, closingBalance, maxAppliedSequence, observedAt, unresolvedEvents, failedEvents, stale, freshness }` |
+| `GET /customers/{customerId}/consolidation/daily?day=` (API do consolidado, :5110) | idem | os mesmos campos somados sobre as contas incluídas, mais `accounts: [{ accountId, credits, debits, net, movementCount, closingBalance, maxAppliedSequence }]` e `excludedAccounts: [{ accountId, openedAt }]` |
 
 | Situação | HTTP | `code` |
 |---|---|---|
@@ -165,6 +257,9 @@ Prefixo `/api/v1`; todas as rotas de negócio exigem `Authorization: Bearer <jwt
 | Mesma chave com conteúdo diferente | 422 | `idempotency_key_conflict` |
 | `asOf` ausente, ilegível ou mais de 5 minutos no futuro | 422 | `validation_error` |
 | `asOf` antes da abertura da conta, ou nenhuma conta do cliente aberta em `asOf` | 422 | `historico_insuficiente` |
+| Consolidado: `day` fora de `YYYY-MM-DD`, ausente ou futuro | 422 | `validation_error` |
+| Consolidado: conta aberta depois do fim do dia, ou nenhuma conta do cliente incluída | 422 | `historico_insuficiente` |
+| Consolidado: fase do bootstrap ainda não é `live` | 503 | `consolidation_not_ready` |
 | Conflito concorrente cuja linha ainda não ficou visível (raro) | 409 | `retry_later` |
 | Corpo com mais de 16 KB | 413 | `payload_too_large` (sem `Content-Length`, o servidor recusa com 413 sem corpo) |
 | Banco indisponível ou sem resposta no prazo | 503 | `dependency_unavailable` |
@@ -174,6 +269,8 @@ Prefixo `/api/v1`; todas as rotas de negócio exigem `Authorization: Bearer <jwt
 
 - **Indisponibilidade:** se o PostgreSQL não responde (conexão recusada, `Timeout`, `Command Timeout`), qualquer rota que precise do banco devolve `503 dependency_unavailable` em ProblemDetails, com `traceId` e sem detalhes da exceção. Nunca `200` com saldo zero e nunca `201` sem commit. A API não repete POST sozinha: repita com a **mesma** `Idempotency-Key`. Se a tentativa que recebeu `503` não chegou ao commit, a repetição cria; se chegou, devolve `200` com o mesmo movimento. Dados confirmados sobrevivem ao reinício do banco (o volume do `docker-compose.yml` é preservado).
 - **Saúde (anônima, fora de `/api/v1`):** `GET /health/live` devolve `200 {"status":"Healthy"}` sempre que o processo responde, sem tocar o banco. `GET /health/ready` executa `SELECT 1` em até 3 s e devolve `200 {"status":"Healthy"}` ou `503 {"status":"Unhealthy"}`. Nenhuma das respostas traz nome de dependência, mensagem de exceção ou connection string. As rotas financeiras seguem exigindo token.
+- **Saúde do Worker e da API do consolidado (anônima):** `/health/live` responde `200 {"status":"Healthy"}` sempre que o processo responde. `/health/ready` do Worker devolve `200 {"status":"Healthy"}`, `503 {"status":"Degraded"}` (aguardando bootstrap, registro de controle divergente, reconciliação falhou ou última falha de ambiente ainda não desarmada) ou `503 {"status":"Unhealthy"}` (`SELECT 1` falhou na origem ou na projeção, prazo de 3 s). `/health/ready` da API do consolidado é `503 Unhealthy` enquanto a fase não é `live` ou a origem ou a projeção não respondem. A readiness da API de lançamentos **não** olha nenhum deles.
+- **Indisponibilidade do consolidado:** se a projeção não responde, a API do consolidado devolve `503 dependency_unavailable` (nunca saldo zero ou substituto), com orçamento de 1,5 s por requisição e `Timeout=1;Command Timeout=1` nas suas conexões. A meta de resposta de falha em até 2 s é **hipótese do projeto**, exercitada para o modo conexão recusada; o modo "aceita e não responde" não foi exercitado. O Worker mantém `Timeout=5;Command Timeout=15`.
 - **Limite de requisição:** corpos acima de 16 KB em `/api/v1` são recusados com `413` e nada é persistido. `Idempotency-Key` tem no máximo 128 caracteres.
 - **Logs da aplicação:** nunca registram corpo, `Authorization`, `Idempotency-Key` bruta, connection string ou chave. O registro de um movimento gera o evento `MovementRegistered` com o `movementId`; indisponibilidade gera `DependencyUnavailable` (Warning) com rota e `traceId`.
 
@@ -193,9 +290,9 @@ dotnet build FinancialTransactions.sln -c Release
 dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vstest.runsettings
 ```
 
-Os testes de integração sobem a API real (`WebApplicationFactory`) contra um banco PostgreSQL descartável por execução (`ft_test_<hex>`), criado e migrado no início e removido ao final. Eles usam por padrão a conexão administrativa `Host=127.0.0.1;Port=15432;Database=postgres;Username=ft;Password=ft_local_dev_only`; para outro servidor, defina `FT_TEST_ADMIN_CONNECTION`. A chave JWT dos testes é gerada a cada execução. Para rodar só os testes de unidade (sem banco): `dotnet test tests/FinancialTransactions.UnitTests -c Release --no-build --settings tests/vstest.runsettings`.
+Os testes de integração sobem a API de lançamentos real (`WebApplicationFactory`), o Worker e a API do consolidado (hosts reais, Kestrel em porta livre, no processo de teste) contra **dois** bancos PostgreSQL descartáveis por execução: `ft_test_<hex>` na origem e `ft_cons_test_<hex>` na consolidação, criados e migrados no início e removidos ao final. Os subcasos do bootstrap (C9a a C9h) usam um par de bancos próprio cada. Eles usam por padrão as conexões administrativas `Host=127.0.0.1;Port=15432;Database=postgres;Username=ft;Password=ft_local_dev_only` (origem, `FT_TEST_ADMIN_CONNECTION`) e `Host=127.0.0.1;Port=15433;Database=postgres;Username=ft;Password=ft_local_dev_only` (consolidação, `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION`); para outros servidores, defina as variáveis. **Os dois containers precisam estar `healthy`** (`docker compose up -d --wait`). Os testes do consolidado esperam condições observáveis (consulta ao banco, eventos do consumidor) e usam intervalos reduzidos do laço; os de produção (500 ms, 2 s, backoff de 1 s a 30 s) são cobertos por teste de unidade. A chave JWT dos testes é gerada a cada execução. Para rodar só os testes de unidade (sem banco): `dotnet test tests/FinancialTransactions.UnitTests -c Release --no-build --settings tests/vstest.runsettings`.
 
-Resultado esperado: 92 testes de unidade e 45 de integração (137), todos aprovados. Fontes dos resultados registrados: *execução local* e *governança local* em 19/10/2026 (ciclo P04) e a execução feita para esta documentação, também em 19/10/2026; detalhes, comandos e contagens por ciclo em [docs/verificacao.md](docs/verificacao.md). A *CI* tem o seu próprio resultado, na seção [CI](#ci); os contadores locais não são atribuídos à CI nem o contrário.
+Resultado esperado: **173 testes de unidade e 98 de integração (271)**, todos aprovados; os 137 dos ciclos anteriores continuam presentes, pelo nome, e passam. Fonte dos números: *execução local* do executor no ciclo P07 (19/10/2026, duas rodadas); a *governança* reexecuta por conta própria. Comandos, contagens por ciclo, a sondagem contra processos reais e as ressalvas estão em [docs/verificacao.md](docs/verificacao.md). A *CI* tem o seu próprio resultado, na seção [CI](#ci); os contadores locais não são atribuídos à CI nem o contrário.
 
 ## Ensaio de carga
 
@@ -216,15 +313,17 @@ A ferramenta usa a mesma `FT__Auth__SigningKey` da API para emitir os tokens, s�
 
 ## CI
 
-O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) (nome `ci`) roda em `push` na `main` e em `pull_request`. Ele usa `ubuntu-latest` com um serviço `postgres:17` (a mesma credencial sintética do `docker-compose.yml`, sem nenhum segredo), SDK .NET 10.0.x e executa:
+O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) (nome `ci`) roda em `push` na `main` e em `pull_request`. Ele usa `ubuntu-latest` com **dois** serviços `postgres:17` (origem em `15432` e consolidação em `15433`, a mesma credencial sintética do `docker-compose.yml`, sem nenhum segredo, ambos com `POSTGRES_DB=postgres` e sonda `pg_isready -U ft -d postgres`), SDK .NET 10.0.x e executa:
 
 - `dotnet msbuild FinancialTransactions.sln -target:Restore -warnaserror`;
 - `dotnet build FinancialTransactions.sln -c Release --no-restore --no-incremental -warnaserror`;
-- `dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vstest.runsettings`, com `FT_TEST_ADMIN_CONNECTION` apontando para o serviço.
+- `dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vstest.runsettings`, com `FT_TEST_ADMIN_CONNECTION` e `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION` apontando para os serviços.
 
 **Estado verificado (fonte: CI, consulta à API pública do GitHub em 19/10/2026):** para o commit `abcdf19c073dc95505010a593126248dc2bcc79a` há uma execução, o [run 39201091893](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39201091893) (número 3, tentativa 1, evento `push`, 19/10/2026 04:45 UTC), job `build-and-test` (id 117894019834), com conclusão `success`. Segundo a governança do projeto em 19/10/2026, o workflow também executou com sucesso nos commits `fe545e9` e `ccf7bc7` (não reconferidos na consulta feita para esta documentação). Os contadores do log do run de `abcdf19` (Ubuntu 24.04.5, SDK 10.0.402, PostgreSQL 17.11, 92 testes de unidade e 45 de integração aprovados) foram **lidos pelo auditor-master** em 19/10/2026; a API consultada não os devolve.
 
 O restore e o build rodaram **sem diagnósticos de warning de compilação**. O log do workflow contém avisos de outra natureza (depreciação de módulo do Node, versão de Node declarada pelas actions e mensagens do serviço PostgreSQL sobre a sonda de saúde); estão registrados como pendências de manutenção do workflow em [docs/verificacao.md](docs/verificacao.md).
+
+**Estado desta versão (ciclo P07):** o workflow ganhou o segundo serviço PostgreSQL e a variável `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION`; **ainda sem execução na CI** (o estado verificado acima é o da versão anterior). Os testes do consolidado têm esperas de tempo real e rodam em runner compartilhado: uma falha intermitente na CI seria registrada, não escondida.
 
 O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício do banco, limite de corpo contra Kestrel real) nem o roteiro deste README, e não publica relatórios de teste. A execução vale para o commit indicado; commits posteriores têm a sua própria execução na página de Actions do repositório.
 
@@ -242,7 +341,11 @@ O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício d
 
 - `src/FinancialTransactions.Domain`: entidades, `MovementAmount`, regras temporais e de sinal, chave de idempotência e fingerprint.
 - `src/FinancialTransactions.Infrastructure`: `DbContext`, configurações snake_case, migration com seed, `PositionQueries` (agregação por `SUM`/`COUNT` no banco).
-- `src/FinancialTransactions.Api`: endpoints, JWT, autorização por recurso, `ProblemDetails`, caso de uso `RegisterMovement`.
+- `src/FinancialTransactions.Api`: endpoints, autorização por recurso, `ProblemDetails`, caso de uso `RegisterMovement` (grava o movimento e o evento da Outbox na mesma transação).
+- `src/FinancialTransactions.Auth`: JWT local e escopo por cliente, compartilhados pelas duas APIs; não referencia nenhum outro projeto.
+- `src/FinancialTransactions.Consolidation`: núcleo da consolidação (projeção, aplicação idempotente, consumo da Outbox, bootstrap, consultas, saúde).
+- `src/FinancialTransactions.Consolidation.Worker`: executável com dois modos, serviço (consumidor único e saúde) e `--backfill` (coordenador).
+- `src/FinancialTransactions.Consolidation.Api`: API do consolidado diário.
 - `tools/FinancialTransactions.DevToken`: emissor local de tokens.
 - `tools/FinancialTransactions.LoadTest`: ferramenta do ensaio de carga e `seed_load.sql`.
 - `tests/`: unidade (xUnit) e integração (xUnit + PostgreSQL real).
@@ -250,15 +353,16 @@ O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício d
 
 ## Documentação
 
-- [docs/escopo.md](docs/escopo.md): hipóteses H1 a H14, decisões por ciclo e matriz de cenários T01 a T16.
+- [docs/escopo.md](docs/escopo.md): fontes e procedência, hipóteses H1 a H15, contrato do consolidado diário, decisões por ciclo e matriz de cenários T01 a T16.
 - [docs/arquitetura.md](docs/arquitetura.md): componentes, fluxos, modelo, decisões (ADRs curtas), segurança e evoluções propostas (não implementadas).
-- [docs/verificacao.md](docs/verificacao.md): requisito → implementação → teste, comandos e resultados datados com a fonte de cada um, ambiente, pendências e checklist de entrega.
+- [docs/verificacao.md](docs/verificacao.md): requisito → implementação → teste, comandos e resultados datados com a fonte de cada um, ambiente, pendências, checklist de entrega e o estado das adequações sugeridas.
 - [docs/carga.md](docs/carga.md): ensaio de carga, reconciliação e planos das consultas.
 
 ## Limites
 
 - **Verificação local:** os testes e o ensaio rodaram em ambiente de desenvolvimento (Windows, Docker Desktop, API, ferramenta e banco na mesma máquina). A CI cobre build e testes em Linux, não o ensaio de carga nem as sondagens manuais.
 - **Carga:** os números de [docs/carga.md](docs/carga.md) são de requisições mistas em laço fechado com 32 trabalhadores; não são capacidade máxima, não são transações financeiras por segundo e não valem para produção. A reconciliação não encontrou divergências nas execuções registradas; não foram realizados controles negativos por adulteração para validar integralmente a capacidade de detecção do reconciliador.
+- **Consolidado diário:** é eventualmente consistente e diz o quanto (`freshness`). Consumidor único e sequencial, sem reserva durável: duas instâncias do Worker não são suportadas nesta fatia. O prazo de resposta de falha (≤ 2 s) é hipótese do projeto, exercitada só para conexão recusada. A API do consolidado depende da origem para autorizar (titularidade da conta). Não foi feito ensaio de carga do consolidado (50 req/s com no máximo 5% de perda é requisito sugerido, **proposto**, não demonstrado). O dia de negócio usa os dados de fuso da máquina. As adequações sugeridas e o que falta de cada uma estão em [docs/verificacao.md](docs/verificacao.md).
 - **Sistema de registro:** não autoriza nem limita saldo; um débito é registrado mesmo que o saldo fique negativo (H1). Não há correção nem estorno.
 - **Tempo:** a posição reflete o conhecimento atual; não há consulta "como se sabia em T2" (H9). `registeredAt` é o instante em que o servidor montou o registro, não o do commit.
 - **Cadastros:** clientes e contas vêm da migration; não há API de cadastro.

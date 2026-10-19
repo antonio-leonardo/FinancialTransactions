@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using FinancialTransactions.Api.Auth;
+using FinancialTransactions.Auth;
 using FinancialTransactions.Api.Http;
 using FinancialTransactions.Api.Movements;
 using FinancialTransactions.Infrastructure;

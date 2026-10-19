@@ -26,8 +26,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      consolidation-postgres:
+        image: postgres:17
+        env:
+          # Credencial sintética de laboratório, a mesma do docker-compose.yml; não é segredo.
+          POSTGRES_USER: ft
+          POSTGRES_PASSWORD: ft_local_dev_only
+          POSTGRES_DB: postgres
+        ports:
+          - 15433:5432
+        options: >-
+          --health-cmd "pg_isready -U ft -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       FT_TEST_ADMIN_CONNECTION: Host=127.0.0.1;Port=15432;Database=postgres;Username=ft;Password=ft_local_dev_only
+      FT_TEST_CONSOLIDATION_ADMIN_CONNECTION: Host=127.0.0.1;Port=15433;Database=postgres;Username=ft;Password=ft_local_dev_only
       DOTNET_NOLOGO: "true"
       DOTNET_CLI_TELEMETRY_OPTOUT: "true"
     steps:

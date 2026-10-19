@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace FinancialTransactions.Api.Auth;
+namespace FinancialTransactions.Auth;
 
 /// <summary>Emissor local de desenvolvimento (H11). Issuer e audience são públicos; só a chave é segredo.</summary>
 public static class AuthDefaults

@@ -1,6 +1,5 @@
-using System.Net.Sockets;
+using FinancialTransactions.Infrastructure;
 using Microsoft.AspNetCore.Diagnostics;
-using Npgsql;
 
 namespace FinancialTransactions.Api.Http;
 
@@ -51,17 +50,6 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
     public static bool IsDependencyUnavailable(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
-        return IsUnavailable(exception) || (exception.InnerException is { } inner && IsUnavailable(inner));
-    }
-
-    private static bool IsUnavailable(Exception exception)
-    {
-        return exception switch
-        {
-            TimeoutException or SocketException => true,
-            NpgsqlException { IsTransient: true } => true,
-            NpgsqlException { InnerException: TimeoutException or SocketException } => true,
-            _ => false,
-        };
+        return DependencyFailure.IsUnavailable(exception);
     }
 }

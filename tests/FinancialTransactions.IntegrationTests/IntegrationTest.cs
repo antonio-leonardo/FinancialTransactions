@@ -159,6 +159,15 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
         return Convert.ToInt64(result, CultureInfo.InvariantCulture);
     }
 
+    protected async Task<long> CountOutboxAsync(Guid accountId)
+    {
+        await using var connection = Fixture.OpenTestConnection();
+        await using var command = new NpgsqlCommand("SELECT COUNT(*) FROM consolidation_outbox WHERE account_id = @id", connection);
+        command.Parameters.AddWithValue("id", accountId);
+        var result = await command.ExecuteScalarAsync();
+        return Convert.ToInt64(result, CultureInfo.InvariantCulture);
+    }
+
     public Task InitializeAsync() => Task.CompletedTask;
 
     public async Task DisposeAsync()
@@ -168,8 +177,10 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
             return;
         }
 
+        // Outbox e movimentos da conta são removidos juntos: sem limpar a Outbox, eventos de um teste contaminariam as contagens do seguinte.
         await using var connection = Fixture.OpenTestConnection();
-        await using var command = new NpgsqlCommand("DELETE FROM movements WHERE account_id = ANY(@ids)", connection);
+        await using var command = new NpgsqlCommand(
+            "DELETE FROM consolidation_outbox WHERE account_id = ANY(@ids); DELETE FROM movements WHERE account_id = ANY(@ids)", connection);
         command.Parameters.AddWithValue("ids", _usedAccounts.Keys.ToArray());
         await command.ExecuteNonQueryAsync();
     }

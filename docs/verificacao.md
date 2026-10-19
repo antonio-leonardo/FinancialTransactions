@@ -44,8 +44,9 @@ Nomes de teste: o `DisplayName` (como aparece no relatório de testes) seguido d
 | T11 | Autenticação e autorização | `Api/Program.cs` (JWT), `Api/Auth/` (`AccountAccess`, `CustomerScope`) | `T11_NoToken_Is401` (`T11NoTokenIs401`), `T11b_OtherCustomer_Is404_EvenOnReplay` (`T11bOtherCustomerIs404EvenOnReplay`), `T11c_InvalidTokens_Are401_NothingPersisted` (`T11cInvalidTokensAre401NothingPersisted`), `T11c_ControlToken_IsAccepted` (`T11cControlTokenIsAccepted`) | executado e aprovado | 19/10/2026, esta tentativa |
 | T12 | Precisão e seleção | `Domain/MovementAmount.cs`, `Infrastructure/PositionQueries.cs` | `T12_HundredCents_SumExactlyOneReal` (`T12HundredCentsSumExactlyOneReal`), `T12_Selection_OtherAccountAndOtherCustomerDoNotLeak` (`T12SelectionOtherAccountAndOtherCustomerDoNotLeak`), `PositionQuery_AggregatesInDatabase` (`PositionQueryAggregatesInDatabase`); unidade: `MovementAmountTests.TryCreateRejectsInvalidAmounts` (casos `"10.005"` e `"0.001"` rejeitados por escala), `MovementAmountTests.TryCreateAcceptsValidAmounts`, `MovementRulesTests.SignedAmountIsPositiveForCreditAndNegativeForDebit` | executado e aprovado | 19/10/2026, esta tentativa |
 | T13 | Indisponibilidade e recuperação | `Api/Http/ApiExceptionHandler.cs`, `Api/Health/`, `Api/Http/RequestBodyLimit.cs` | `T13a_PostWhenDatabaseUnreachable_Is503_WithinDeadline` (`T13aPostWhenDatabaseUnreachableIs503WithinDeadline`), `T13b_GetPositionWhenDatabaseUnreachable_Is503_NotZero` (`T13bGetPositionWhenDatabaseUnreachableIs503NotZero`), `T13c_ReadyIs503_LiveIs200_WhenDatabaseUnreachable` (`T13cReadyIs503LiveIs200WhenDatabaseUnreachable`), `T13d_ReadyIs200_WhenDatabaseAvailable` (`T13dReadyIs200WhenDatabaseAvailable`), `Health_IsAnonymous_ApiIsNot` (`HealthIsAnonymousApiIsNot`), `RequestBody_Over16KB_Is413_NothingPersisted` (`RequestBodyOver16KbIs413NothingPersisted`), `Logs_DoNotContainSecretsOrBodies` (`LogsDoNotContainSecretsOrBodies`); unidade: `IsDependencyUnavailable_TrueForTimeoutException`, `IsDependencyUnavailable_TrueForSocketException`, `IsDependencyUnavailable_TrueForTransientNpgsqlException`, `IsDependencyUnavailable_FalseForInvalidOperationException`, `IsDependencyUnavailable_FalseForUniqueViolation`; sondagem de reinício (seção 4) | executado e aprovado | testes: 19/10/2026, esta tentativa; sondagem: 19/10/2026, executor local (P03) e governança local (P03) |
-| T14 | Correção e reconciliação | reconciliação da ferramenta `tools/FinancialTransactions.LoadTest/Reconciliation.cs` | reconciliação pós-carga ([carga.md](carga.md)); não há teste automatizado de correção | **parcial**: reconciliação pós-carga executada nas duas execuções do ensaio, sem divergências; correção e estorno fora de escopo (ver seção 6) | 19/10/2026, executor local e governança local (P04) |
-| T15 | Mensageria | nenhum | nenhum | **não aplicável**: H12 (sem broker nem Outbox) | n/a |
+| T14 | Correção e reconciliação | reconciliação da ferramenta `tools/FinancialTransactions.LoadTest/Reconciliation.cs` e, desde P07, `Consolidation/BootstrapReconciler.cs` | reconciliação pós-carga ([carga.md](carga.md)); reconciliação do conjunto inicial por identidade (C2, C9a a C9h); não há teste automatizado de correção | **parcial**: reconciliação pós-carga executada nas duas execuções do ensaio, sem divergências; reconciliação do consolidado (contagem, créditos, débitos, líquido e ids por conta e dia) executada no bootstrap; correção e estorno fora de escopo (ver seção 6) | 19/10/2026, executor local e governança local (P04) |
+| T15 | Mensageria (comunicação assíncrona) | `Domain/OutboxEvent.cs`, `Api/Movements/RegisterMovementHandler.cs`, `Consolidation/` (consumidor, applier), `Consolidation.Worker` | cenários C1 a C15 (seção 9.2) | **executado e aprovado** nos cenários do ciclo P07: comunicação assíncrona por trabalho durável no banco, sem broker; broker é alternativa documentada (ADR-10 em [arquitetura.md](arquitetura.md)). **Delta:** até P06 esta linha dizia "não aplicável" por H12, que vedava broker e Outbox | seção 9.3 |
+| T15 (histórico, versão A) | Mensageria | nenhum | nenhum | **não aplicável**: H12 (sem broker nem Outbox). Preservada para o histórico; substituída pela linha acima a partir de P07 | n/a |
 | T16 | Carga e aceitação | `tools/FinancialTransactions.LoadTest`, [carga.md](carga.md), `.github/workflows/ci.yml` | ensaio de carga (duas execuções) e CI | carga executada; CI executada com sucesso em A (run 39219056456); aceitação por checkout novo em A (seção 8) | carga: executor local e governança local, 19/10/2026, P04; CI e aceitação: ver seções 5, 5.2 e 8 |
 
 Outros comportamentos do contrato com teste próprio:
@@ -192,12 +193,13 @@ Da *leitura do auditor-master* do run 39217752456 (mesma árvore): runner 2.337.
 | Item | Situação |
 |---|---|
 | T09 | **Não aplicável**: sistema de registro, sem regra sobre o agregado (H1). |
-| T15 | **Não aplicável**: sem mensageria (H12). |
+| T15 | **Executado e aprovado** em P07 (comunicação assíncrona por trabalho durável no banco, sem broker); era "não aplicável" até P06 por H12. Ver a seção 9. |
 | T14 | **Parcial**: reconciliação pós-carga executada; não há fluxo de correção ou estorno (fora de escopo). |
 | Reconciliação | A reconciliação não encontrou divergências nas execuções registradas; não foram realizados controles negativos por adulteração para validar integralmente a capacidade de detecção do reconciliador. |
 | Relógio nos testes | `TimeProvider` é injetado e resolvido como `TimeProvider.System`; a fixture de testes não oferece controle ou congelamento sistemático do tempo. |
 | Checkout novo | **Verificado em A** (seção 8): clone novo da URL pública em contexto sem credencial, roteiro de aceitação com `rc` 0 e passo a passo do README. Ressalva: o comando `docker compose up -d --wait` não foi exercitado a partir do clone (ver seção 8). |
-| Diagramas Mermaid | Conferidos por leitura; **renderização no GitHub: pendente de confirmação visual do responsável do projeto** (não informada até esta aceitação). |
+| Diagramas Mermaid | Conferidos por leitura; **renderização no GitHub: pendente de confirmação visual do responsável do projeto** (não informada até esta aceitação). Em P07 foram acrescentados três diagramas (componentes, sequência do consolidado e estados do bootstrap), também só conferidos por leitura. |
+| Ciclo P07 | Pendências próprias na seção 9.6: CI sem execução desta versão, consumidor único, ensaio do consolidado, alta disponibilidade, fuso anterior a 2004. |
 | `GOV-P04-CI-01` | **Aplicada e executada com sucesso** (seção 5.2). O desaparecimento da mensagem sobre a base `ft` está registrado por leitura de terceiro de um run de árvore idêntica; o log do run de A não foi lido. |
 | `GOV-P04-CI-02` | **Aplicada e executada com sucesso** para as duas actions (`checkout@v7`, `setup-dotnet@v6`; seção 5.2). |
 | Descrição do repositório (About) | **Pendente (ação do responsável do projeto).** Consulta anônima à API em 19/10/2026: a descrição vigente ainda não está em redação própria (reproduz texto de origem externa); `topics` vazio e `homepage` nulo. Não é corrigível por commit: é metadado do GitHub. Sugestão: "API .NET 10 com histórico de créditos e débitos, consultas temporais de saldo e operações idempotentes. PostgreSQL e JWT para demonstração local." |
@@ -208,6 +210,8 @@ Da *leitura do auditor-master* do run 39217752456 (mesma árvore): runner 2.337.
 | Divergências README ↔ código da consolidação anterior | Corrigidas no texto, sem alterar código (ver "Decisões do ciclo P05" em [escopo.md](escopo.md)): replay "reconstruído a partir da resposta"; exclusividade da credencial de laboratório; estado da CI; comentário de posição sem chamada às 11:30. Nenhum defeito de código foi encontrado. |
 
 ## 7. Checklist de entrega
+
+> Os estados desta seção e da seção 8 são da **versão A** (anterior ao ciclo P07). O ciclo P07 altera código, testes, compose, workflow e documentos; a versão que o contiver precisa de um novo portão (seção 8 refeita). Os resultados do ciclo P07 estão na seção 9.
 
 Todos os estados desta seção se referem à versão A (commit `87645ed9e3ed57328eabbd55917062188f370547`); os detalhes estão na seção 8.
 
@@ -301,3 +305,121 @@ Prova: que, em checkout limpo da versão pública, todos os projetos inventariad
 - **Aprovação técnica:** **aprovado no escopo verificado** (versão A, 19/10/2026): clone novo em contexto sem credencial; roteiro de aceitação com `rc` 0; 92 + 45 testes novos aprovados; build sem warnings; README seguido (com a ressalva do passo do `docker compose`); controles negativos reprovando pelas causas previstas. Ressalvas: prova positiva da varredura do histórico nos termos originais não obtida (seção 8.5); log da CI de A não lido; renderização dos diagramas não verificada.
 - **Condições de publicação:** descrição do repositório (About): **pendente** (responsável: dono do repositório; trocar por redação própria); e-mail dos commits: **feito** (histórico reescrito em 19/10/2026, 18 de 18 campos com um único domínio); renderização dos diagramas no GitHub: **pendente** de confirmação visual do responsável; nenhum risco aceito formalmente até esta data.
 - **Próxima ação:** o responsável troca a descrição do repositório, confirma a renderização dos três diagramas, comita e envia esta documentação (a versão que a contém será a versão final B) e informa o SHA de B; a verificação final de B repete o roteiro de aceitação em clone novo e confere o que mudou em relação a A.
+
+## 9. Ciclo P07: consolidado diário independente
+
+Esta seção registra o que o ciclo P07 implementou e o que foi **executado** (fonte: *executor local*, 19/10/2026), separando o que está feito do que fica para os ciclos seguintes. A governança reexecuta por conta própria; nada aqui é parecer. As hipóteses H15 (consolidado diário por dia de negócio em `America/Sao_Paulo`) e a substituição de H12 são **decisões do responsável do projeto em 19/10/2026**, não requisitos do contratante.
+
+### 9.1 Adequações sugeridas: estado por item
+
+Fonte de cada item: as **adequações sugeridas** após a primeira entrega (ver "Fontes e procedência" em [escopo.md](escopo.md)). Estados segundo H14.
+
+| # | Item | O que esta versão implementa | O que falta | Estado (H14) | Evidência |
+|---|---|---|---|---|---|
+| 1 | Independência dos lançamentos em relação ao consolidado diário | Processo e banco próprios para a consolidação; Outbox na transação do movimento; a escrita não conhece a projeção. Worker parado, projeção fora do ar e API do consolidado parada não impedem registrar, consultar a posição por instante nem a readiness da escrita | segunda instância do Worker e da API do consolidado (P08) | **executado e aprovado** nos cenários C1 a C5 (automatizados e sondagem contra processos reais), sem duas instâncias | seções 9.2, 9.4 e 9.5 |
+| 2 | Estratégia de processamento e recuperação da consolidação | Classes de falha (transitória, ambiente, evento), *backoff* de 1 s a 30 s, quarentena por marcação (5 tentativas), reentrega idempotente, bootstrap reconciliado por identidade e saúde com desarme | reprocessamento administrativo da quarentena, métricas, reverificação ampla da projeção viva e reconstrução de destino perdido (P08) | **parcial** | C4, C6a, C6b, C7, C9a a C9h, C12a, C12b |
+| 3 | Requisito de 50 req/s com no máximo 5% de perda, associando cada resultado ao cenário | nenhum ensaio do consolidado; o requisito está documentado como sugerido em [escopo.md](escopo.md) | ensaio do consolidado em cenário declarado (P08) | **proposto** | nenhuma (ensaio em P08) |
+| 4 | Arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal) | pontos de falha parciais descritos em [arquitetura.md](arquitetura.md); **uma** instância de cada processo | `docs/alta-disponibilidade.md` e a escala horizontal (P09) | **proposto** | nenhuma (P09) |
+| 5 | Aderência ao enunciado, distinguindo obrigatório de hipótese | seção "Fontes e procedência" e rótulos "hipótese do projeto" / "decisão do responsável" em [escopo.md](escopo.md) e [arquitetura.md](arquitetura.md) | revisão final da aderência (P09) | **implementado** | [escopo.md](escopo.md) |
+
+Delta de T15 (mensageria): até P06 era "não aplicável" (H12); passa a **comunicação assíncrona por trabalho durável no banco, sem broker**, com broker como alternativa documentada (ADR-10). A linha histórica está preservada na seção 1.2.
+
+### 9.2 Cenários C1 a C15 → testes
+
+Esperados vindos de valores enviados e de SQL direto, não de código de produção. "Automatizado" = hosts reais (API de lançamentos, Worker e API do consolidado) no processo de teste, sobre dois PostgreSQL reais. A **sondagem** (seção 9.5) é outra evidência, contra processos reais.
+
+| ID | Cenário | Testes | Estado | Última execução |
+|---|---|---|---|---|
+| C1 | Worker parado; 3 POST; consolidado com pendência, `stale`, sem vazamento entre clientes | `C1_WorkerDown_WritesAccepted_ConsolidatedShowsPendingAndStale` | executado e aprovado | 19/10/2026, duas rodadas |
+| C2 | Worker em host novo aplica exatamente os 3 eventos; reconciliação por conta e dia | `C2_WorkerRestartedInNewHost_AppliesExactlyTheThreeEvents_AndReconcilesWithOrigin` | executado e aprovado | idem |
+| C3 | Projeção inalcançável: escrita segue; consolidado `503` em ≤ 2 s (modo conexão recusada), sem saldo | `C3_ProjectionUnreachable_WritesStayUp_ConsolidatedAnswers503WithinTwoSeconds` | executado e aprovado | idem |
+| C4 | ≥ 6 tentativas falhas observadas no mesmo host, *backoff* crescente, recuperação sem intervenção | `C4_ProjectionBackAfterSixFailedAttempts_SameHostRecoversWithoutIntervention` | executado e aprovado | idem |
+| C5 | API do consolidado parada: escrita, posição e readiness inalteradas; depois, `200` | `C5_ConsolidationApiDown_WritesPositionAndReadinessUnaffected_ThenBack` | executado e aprovado | idem |
+| C6a | Falha dentro da transação da projeção: nada persistido; tentativa seguinte aplica uma vez | `C6a_FailureInsideProjectionTransaction_NothingPersisted_NextAttemptAppliesExactlyOnce` | executado e aprovado | idem |
+| C6b | Falha depois do commit e antes da marcação: reentrega não soma de novo | `C6b_FailureAfterProjectionCommitBeforeMark_Redelivery_DoesNotSumAgain` | executado e aprovado | idem |
+| C7 | O mesmo evento reapresentado ao applier é *no-op*; estouro de `numeric(24,2)` é falha do evento | `C7_SameEventPresentedAgainInNewTransaction_IsNoOp`, `C7b_AggregateOverflow_IsAnEventFailure_AndPersistsNothing` | executado e aprovado | idem |
+| C8 | Informação tardia: linha de D−3 muda, linhas seguintes não, `closingBalance` derivado muda | `C8_LateInformation_ChangesTheEventDayRow_AndDerivedClosingBalances_NotTheLaterRows` | executado e aprovado | idem |
+| C9a | Captura com controle causal: `member_count = 12`, 13.º fora do conjunto, aplicado em `live` | `C9a_CaptureWithCausalControl_ExactlyTwelveMembers_ThirteenthAppliedInLive` | executado e aprovado | idem |
+| C9b | O 13.º confirma antes: `member_count = 13` | `C9b_ThirteenthCommitsBeforeTheCoordinator_ThirteenMembers_LiveOnlyAfterAllThirteenReconciled` | executado e aprovado | idem |
+| C9c | Interrupção entre os bancos; reexecução ativa a partir do registro de controle da origem | `C9c_InterruptionBetweenTheDatabases_RerunActivatesFromTheOriginControlRecord_WithoutRemarking` | executado e aprovado | idem |
+| C9d | Conjunto vazio com a mesma interrupção | `C9d_EmptySetWithTheSameInterruption_ControlRecordWithZeroMembers_ActivatesAndLivesWithoutMembers` | executado e aprovado | idem |
+| C9e | Reexecução concorrente com avanço para `live`: nada é alterado | `C9e_ConcurrentRerunReadLoading_ServicePromotesLive_CoordinatorReleased_ChangesNothing` | executado e aprovado | idem |
+| C9f | Serviço antes do coordenador: aguarda sem consumir; `ready` `503 Degraded` | `C9f_ServiceStartedBeforeTheCoordinator_WaitsWithoutConsuming_ThenLoadsAndGoesLive` | executado e aprovado | idem |
+| C9g | Serviço interrompido no meio de `loading`: retoma sem duplicata | `C9g_ServiceInterruptedMidLoading_RestartedInNewHost_NoDuplicates_ReachesLive` | executado e aprovado | idem |
+| C9h | Dois coordenadores: o segundo sai com código 3 pelo lock | `C9h_TwoSimultaneousCoordinators_SecondGetsCode3ByTheLockWithinFiveSeconds_ThirdChangesNothing` | executado e aprovado | idem |
+| C10 | Replay HTTP: `200` e nenhuma Outbox nova | `C10_ReplayHttp_ReturnsOkAndCreatesNoNewOutbox` | executado e aprovado | idem |
+| C11 | Autorização das rotas novas | `C11a_Authorization_NoToken401_OtherCustomer404_UnknownAccount404`, `C11b_UnresolvedEvents_NeverIncludeAnotherCustomersEvents`, `C11c_OriginUnreachableDuringAuthorization_Is503DependencyUnavailable` | executado e aprovado | idem |
+| C12 | Evento inválido vai à quarentena; falha de ambiente não (e `Degraded` com desarme) | `C12a_InvalidEventIsQuarantinedAfterFiveAttempts_ValidOneAppliedAndWorkerAlive`, `C12b_EnvironmentFailure_NoEventQuarantined_ReadyDegraded503_ThenDisarmedAfterFirstSuccessfulCycle` | executado e aprovado | idem |
+| C13 | Regressão: os 137 testes anteriores presentes e aprovados; readiness da escrita independe do consolidado | `C13_Regression_WritesReadinessIsIndependentOfWorkerProjectionAndConsolidationApi` e os 137 anteriores | executado e aprovado | idem |
+| C14 | Corrida do estado de atualização: contadores da observação inicial, valor da consulta posterior | `C14_RaceOnRefreshState_StaleCountersFromTheOriginReading_FinancialFieldsFromTheLaterProjectionQuery` | executado e aprovado | idem |
+| C15 | Movimento e evento sempre juntos | `C15a_FailureAfterCommit_MovementAndEventExistTogether`, `C15b_FailureBeforeCommit_NeitherMovementNorEventExist`, `C15c_ManyAccepted_EveryMovementHasExactlyOneEvent` | executado e aprovado | idem |
+
+Outros testes do ciclo: contrato da API (`DayParameter_*`, `DayBoundary_*`, `CustomerRoute_*`, `Freshness_*`, `RequestBudget_*`, `RequestAborted_*`, `NotReady_*`), composição e configuração (`Composition_*`, `Config_*`, `BackfillMode_*`, `ProjectGraph_*`, `SourceHygiene_*`) e unidade (`BusinessDay_*`, `Classifier_*`, `CoordinatorDecision_*`, `Reconcile_*`, `HealthMapping_*`, `HealthState_*`, `Backoff_*`, `Capacity_*`, `Totals_*`, `ConnectionOptionsValidator_*`, `OutboxEventTests`).
+
+### 9.3 Comandos e resultados
+
+Fonte: *executor local*, 19/10/2026, na solução. SDK 10.0.402. Quatro rodadas de `dotnet test` (duas de cada projeto), com TRX por projeto e rodada.
+
+| Etapa | Comando | Resultado |
+|---|---|---|
+| Restore | `dotnet msbuild FinancialTransactions.sln -target:Restore -warnaserror` | `rc` 0 |
+| Build | `dotnet build FinancialTransactions.sln -c Release --no-restore --no-incremental -warnaserror` | `rc` 0; `0 Warning(s)`, `0 Error(s)`; 11 projetos |
+| Testes de unidade (2 rodadas) | `dotnet test tests/FinancialTransactions.UnitTests -c Release --no-build --settings tests/vstest.runsettings` | `rc` 0; **173 de 173** aprovados nas duas |
+| Testes de integração (2 rodadas) | idem, `IntegrationTests` | `rc` 0; **98 de 98** aprovados nas duas (cerca de 48 s) |
+| Lista nominal | nomes do TRX | 271 nomes iguais nas duas rodadas; **os 137 nomes dos ciclos anteriores estão presentes**; 134 novos; nenhum ignorado |
+
+A CI **não** executou esta versão (seção 9.6).
+
+### 9.4 Verificação de sensibilidade dos testes (mutações do executor)
+
+Mutações compiláveis de poucas linhas, uma por vez, em cópia do arquivo de produção restaurada e conferida byte a byte depois de cada uma. Todas foram **detectadas** pelo teste que deveria detectá-las:
+
+| Mutação | Teste que detectou |
+|---|---|
+| Ordem invertida (projeção antes da origem, pausa mantida) | C14 |
+| Outbox gravada em `SaveChanges` separado, depois do commit | C15a |
+| `unresolvedEvents` contando só `status = 0` | C12a |
+| Reconciliação com `OR bootstrap_id IS NULL` | C9a |
+| Serviço que consome sem linha de bootstrap | C9f |
+| `Degraded` com HTTP 200 | C9f e C12b |
+| Coordenador que faz `UPDATE ... phase = 'loading'` | C9e |
+| `pg_advisory_lock` bloqueante | C9h |
+| Marcador de `processed_events` fora da transação | C6a |
+| Coordenador que recaptura ignorando o registro de controle | C9c e C9d |
+
+Uma primeira tentativa da mutação da reconciliação produziu SQL malformado (erro de escape no próprio *script* de mutação) e foi descartada; a mutação válida foi refeita. Não foram executadas por esta verificação: `attempts` incrementado em falha transitória (C4), readiness da escrita incluindo a projeção (C13) e a marcação de pertença em transação própria `READ COMMITTED`.
+
+### 9.5 Sondagem contra processos reais (C1 a C5 e `--backfill`)
+
+Fonte: *executor local*, 19/10/2026. Executáveis `Release` dos três processos (Kestrel real nas portas 5100, 5120 e 5110), bancos descartáveis `ft_p07_src_<carimbo>` e `ft_p07_cons_<carimbo>` (e um segundo par só para a concorrência de coordenadores), conexões e chave só em memória. A parada da consolidação foi **real**: `docker stop` do container `financialtransactions-consolidation-postgres`, religado em `finally`. Este é um tipo de evidência distinto dos testes automatizados da seção 9.2. Uma primeira execução do *script* foi interrompida por defeito do próprio *script* (montagem de argumentos do `docker exec` que segura o lock, no passo B4); os 18 passos anteriores tinham passado; o *script* foi corrigido e **toda** a sondagem foi refeita. O resultado abaixo é o da segunda execução.
+
+| Passo | Ação | Status | Campos-chave |
+|---|---|---|---|
+| S0 | API de lançamentos sobe sem a connection string da projeção | 200 | readiness `Healthy` |
+| B1 | `--backfill` do executável real, primeira execução (3 movimentos legados) | saída **0** | `loading`, `member_count = 3`; registro de controle na origem com o mesmo `bootstrap_id` |
+| B2 | `--backfill`, segunda execução | saída **0** | linha do destino e `xmin` idênticos (nada tocado) |
+| S1 | Worker em modo serviço | 200 | fase chega a `live`; `ready` `{"status":"Healthy"}`; `processed_events = 3` |
+| S2, S3 | API do consolidado e `GET` da conta A1 em 2026-09-01 | 200 | `credits 10.00`, `debits 4.00`, `movementCount 2`, `complete` |
+| C1 | Worker encerrado; 3 `POST` | 201, 201, 201 | Outbox com 3 pendentes; `GET` A1: `unresolvedEvents 2`, `stale true`, `freshness stale`; A2: 1; cliente A: 3; cliente B: 0 |
+| C2 | Worker em **novo processo** (PID diferente) | 200 | `processed_events` 3 → 6 (delta 3); A1 `credits 100.00`, `debits 30.00`, `complete`; reconciliação por conta (contagem:soma) origem = projeção |
+| C3 | `docker stop` da consolidação; `POST`; `GET` consolidado | 201; 503 em 0,04 s | `dependency_unavailable`, sem campos de saldo; posição por instante 200; readiness da escrita 200 |
+| C4 | o Worker segue vivo; 6 tentativas falhas no log; `docker start` | 200 | nenhum evento em quarentena; `attempts` máximo 0; **mesmo PID**; `credits` de A1 = 110,00; `complete`; `ready` do Worker `Healthy` |
+| C5 | API do consolidado encerrada | 201 | posição 200; readiness da escrita 200; `GET` consolidado com a API fora: conexão recusada. Religada: 200, `credits` 115,00 |
+| B3 | dois `--backfill` disparados juntos (30.000 movimentos legados, par próprio) | saídas **0 e 3** | sobreposição real: um terminou pelo lock |
+| B4 | `--backfill` com o lock consultivo mantido por uma sessão externa | saída **3** | `xmin` do destino inalterado |
+| B5 | `--backfill` depois de liberado | saída **0** | sem alteração |
+
+Limpeza: processos próprios encerrados pelo PID registrado; os quatro bancos removidos pela lista exata; **o id do container da origem é o mesmo antes e depois**; os dois containers `healthy` ao final; varredura dos logs dos processos (chave, tokens, `Password=`): 0 ocorrências. O tempo de 0,04 s do `503` reflete conexão **recusada**; o modo "aceita e não responde" não foi exercitado.
+
+### 9.6 Limites e pendências do ciclo
+
+| Item | Situação |
+|---|---|
+| CI | O workflow foi alterado (segundo serviço PostgreSQL e variável de conexão administrativa), mas **não executou** esta versão. Os testes do consolidado têm esperas de tempo real e vão rodar em runner compartilhado: intermitência é possível e seria registrada. |
+| Consumidor único | Reserva durável, mais de um Worker ou de uma API do consolidado, reprocessamento administrativo da quarentena, métricas, reverificação ampla da projeção e reconstrução de destino perdido: **P08**. |
+| Carga do consolidado | 50 req/s com no máximo 5% de perda: **proposto**, sem ensaio. A meta de ≤ 2 s para a falha de dependência é hipótese do projeto, exercitada só para conexão recusada. |
+| Alta disponibilidade | **P09**. |
+| Fuso | Medido em 19/10/2026 (473.329 instantes, 2000 a 2026, passo de 30 min): o .NET desta máquina (Windows) e o PostgreSQL concordam de 2004 a 2026 e divergem em 212 instantes de 2000 a 2003. Faixa fora do uso do laboratório (as contas abrem em 2026); declarado em [arquitetura.md](arquitetura.md), ADR-12. O runner Linux da CI usa o `tzdata` do IANA e não foi verificado. |
+| Mutações | As não executadas estão listadas na seção 9.4. |
+| README | O passo a passo do consolidado no README (três processos, `--backfill`) foi **verificado pela sondagem** com os mesmos executáveis e variáveis, não por um roteiro de checkout novo: o `docker compose up -d --wait` e os `dotnet ef database update` contra os bancos de desenvolvimento **não** foram executados (apenas contra bancos descartáveis). O caminho `dotnet run` dos dois processos novos (perfil `http`, portas 5120 e 5110, `--backfill` com saída 2) foi exercitado com as connection strings apontando para uma porta fechada, sem tocar em nenhum banco: `live` 200 e `ready` 503 `Unhealthy` nos dois, e as portas liberadas depois. |
+| Diagramas | Os diagramas novos (componentes, sequência e estados) foram conferidos por leitura; a renderização no GitHub permanece pendente. |

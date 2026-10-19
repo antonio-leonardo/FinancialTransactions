@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\FinancialTransactions.Auth\FinancialTransactions.Auth.csproj" />
+    <ProjectReference Include="..\FinancialTransactions.Consolidation\FinancialTransactions.Consolidation.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!-- Identificador do cofre local de user-secrets (não é segredo); lido só em Development. -->
+    <UserSecretsId>financialtransactions-consolidation-api-dev</UserSecretsId>
+  </PropertyGroup>
+
+</Project>

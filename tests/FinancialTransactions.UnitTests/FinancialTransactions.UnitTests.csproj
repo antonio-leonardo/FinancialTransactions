@@ -18,6 +18,7 @@
     <ProjectReference Include="..\..\src\FinancialTransactions.Domain\FinancialTransactions.Domain.csproj" />
     <ProjectReference Include="..\..\src\FinancialTransactions.Api\FinancialTransactions.Api.csproj" />
     <ProjectReference Include="..\..\src\FinancialTransactions.Infrastructure\FinancialTransactions.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\FinancialTransactions.Consolidation\FinancialTransactions.Consolidation.csproj" />
   </ItemGroup>
 
 </Project>

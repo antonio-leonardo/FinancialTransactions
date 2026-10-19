@@ -1,54 +1,74 @@
 # Arquitetura
 
-Este documento descreve o que está implementado em `FinancialTransactions` e por que foi desenhado assim. As hipóteses de negócio (H1 a H14) estão em [escopo.md](escopo.md); a correspondência requisito → código → teste e os resultados datados estão em [verificacao.md](verificacao.md); o ensaio de carga está em [carga.md](carga.md). A única seção que fala de coisas **não implementadas** é a última, [Evoluções e o que faria diferente com mais tempo](#evoluções-e-o-que-faria-diferente-com-mais-tempo).
+Este documento descreve o que está implementado em `FinancialTransactions` e por que foi desenhado assim. As hipóteses de negócio (H1 a H15) estão em [escopo.md](escopo.md); a correspondência requisito → código → teste e os resultados datados estão em [verificacao.md](verificacao.md); o ensaio de carga está em [carga.md](carga.md). A única seção que fala de coisas **não implementadas** é a última, [Evoluções e o que faria diferente com mais tempo](#evoluções-e-o-que-faria-diferente-com-mais-tempo).
 
 ## Visão
 
-O sistema é um **registro de movimentações financeiras** (créditos e débitos em contas de clientes) com consulta de **posição derivada**: o saldo de uma conta ou de um cliente em um instante `asOf`, calculado a partir dos movimentos com `effectiveAt <= asOf`.
+O sistema é um **registro de movimentações financeiras** (créditos e débitos em contas de clientes) com duas leituras derivadas:
+
+- a **posição por instante**: o saldo de uma conta ou de um cliente em um instante `asOf`, calculado a partir dos movimentos com `effectiveAt <= asOf`, direto na origem (inalterada desde P01);
+- o **consolidado diário**: créditos, débitos, líquido e fechamento acumulado por conta ou cliente e **dia de negócio** (`America/Sao_Paulo`), mantido por uma projeção própria, em **outro processo e outro banco**, alimentada por trabalho durável gravado na origem (H15, ciclo P07).
+
+Três estados atravessam o consolidado e são mantidos distintos no código, nos testes e aqui: **evento enfileirado** (linha na Outbox da origem), **evento aplicado** (marcador e soma na projeção) e **resposta comprovadamente completa no recorte e no instante declarados** (`freshness`).
 
 O que ele **não** é:
 
 - não autoriza operações nem limita saldo: um débito é registrado mesmo que deixe o saldo negativo, porque o fato já ocorreu (H1);
 - não corrige nem estorna movimentos: não há atualização nem exclusão de movimentos pela API;
 - não gerencia cadastros: clientes e contas são semeados pela migration (H2);
-- não publica eventos nem tem fila, cache ou posição materializada (H12).
+- não tem broker de mensagens, cache ou posição materializada na origem. A comunicação assíncrona do consolidado usa trabalho durável no banco (ADR-10).
 
 ## Componentes e fronteiras
 
 ```mermaid
 flowchart LR
-    client[Cliente HTTP]
-    subgraph api[Processo da API ASP.NET Core]
-        auth[Autenticação JWT e autorização por recurso]
-        endpoints[Endpoints Minimal APIs]
-        handler[RegisterMovementHandler]
-        posep[PositionEndpoints]
-        pq[PositionQueries]
-        ef[DbContext EF Core]
+    client["Cliente HTTP"]
+    subgraph writes["Processo 1 - API de lançamentos :5100"]
+        auth1["JWT e autorização por recurso"]
+        handler["RegisterMovementHandler"]
+        posep["PositionEndpoints e PositionQueries"]
     end
-    pg[PostgreSQL 17]
-    devtoken[Ferramenta DevToken]
-    load[Ferramenta LoadTest]
+    subgraph worker["Processo 2 - Consolidation.Worker :5120"]
+        consumer["Consumidor único"]
+        coord["Coordenador (modo backfill)"]
+        wh["Saúde: live e ready"]
+    end
+    subgraph capi["Processo 3 - Consolidation.Api :5110"]
+        auth2["JWT e autorização por recurso"]
+        daily["Consolidado diário"]
+    end
+    origin[("Origem - PostgreSQL 15432: movements, accounts, consolidation_outbox, consolidation_bootstrap_capture")]
+    proj[("Consolidação - PostgreSQL 15433: daily_account_consolidation, processed_events, consolidation_bootstrap")]
 
-    client --> auth --> endpoints
-    endpoints --> handler --> ef
-    endpoints --> posep --> pq --> ef
-    ef --> pg
-    devtoken -. emite token .-> client
-    load -. chamadas HTTP .-> endpoints
-    load -. reconciliação por SQL .-> pg
+    client --> auth1
+    auth1 --> handler
+    auth1 --> posep
+    handler -->|"movimento e evento na mesma transação"| origin
+    posep --> origin
+    consumer -->|"lê pendentes com SKIP LOCKED e marca depois do commit da projeção"| origin
+    consumer -->|"marcador e UPSERT na mesma transação"| proj
+    coord -->|"captura em REPEATABLE READ e registro de controle"| origin
+    coord -->|"ativa o destino com INSERT ON CONFLICT DO NOTHING"| proj
+    client --> auth2
+    auth2 --> daily
+    daily -->|"1. titularidade e estado de atualização"| origin
+    daily -->|"2. consulta única em READ COMMITTED"| proj
 ```
 
-A API é um único processo. `DevToken` e `LoadTest` são ferramentas de console separadas: não fazem parte da API e não são referenciadas por ela.
+São **três processos** e **dois bancos**. A API de lançamentos **não conhece** a consolidação: não referencia seus projetos, não tem a connection string da projeção e a sua readiness só olha a origem (I7). A API do consolidado **depende da origem para autorizar** (a titularidade da conta está lá) e para informar o estado de atualização; sem a origem ela responde `503`, e isso é declarado, não escondido. `DevToken` e `LoadTest` são ferramentas de console separadas: não fazem parte das APIs e não são referenciadas por elas.
 
 | Projeto | Responsabilidade | Depende de |
 |---|---|---|
 | `src/FinancialTransactions.Domain` | Tipos e regras puros: `Movement`, `MovementAmount`, `MovementRules`, `IdempotencyKey` (validação e fingerprint), `InstantParser`, `Account`, `Customer`. Sem I/O. | nada além da biblioteca base |
-| `src/FinancialTransactions.Infrastructure` | Persistência: `FinancialTransactionsDbContext`, configurações snake_case, migration `InitialSchema` com seed, `MovementAmountConverter`, `PositionQueries` (SUM e COUNT no banco). | Domain, EF Core, Npgsql |
-| `src/FinancialTransactions.Api` | Transporte e orquestração: Minimal APIs, JWT, autorização por recurso (`AccountAccess`), `ProblemDetails`, `RegisterMovementHandler`, health checks, limite de corpo, logs. | Infrastructure (e, por ela, Domain) |
+| `src/FinancialTransactions.Infrastructure` | Persistência da origem: `FinancialTransactionsDbContext`, configurações snake_case, migrations `InitialSchema` (com seed) e `AddConsolidationOutbox`, `MovementAmountConverter`, `PositionQueries` (SUM e COUNT no banco), `DependencyFailure` (classificação única de "o banco não respondeu"). | Domain, EF Core, Npgsql |
+| `src/FinancialTransactions.Api` | Transporte e orquestração da escrita: Minimal APIs, autorização por recurso (`AccountAccess`), `ProblemDetails`, `RegisterMovementHandler` (grava movimento **e** evento da Outbox), health checks, limite de corpo, logs. | Auth, Infrastructure (e, por ela, Domain) |
+| `src/FinancialTransactions.Auth` | `AddFinancialTransactionsJwt`, `CustomerScope`, `AuthDefaults`: o JWT local compartilhado pelas duas APIs. **Não referencia nenhum outro projeto da solução** (teste de grafo). | pacote de JWT |
+| `src/FinancialTransactions.Consolidation` | Núcleo da consolidação: `ConsolidationDbContext` e migration `ConsolidationSchema`, `BusinessDay`, `DailyConsolidationApplier`, `IConsolidationSource`/`OutboxConsolidationSource`, `FailureClassifier`, `ConsolidationConsumer` (laço), `BootstrapCoordinator` e `BootstrapReconciler`, `ConsolidationQueries` e `UnresolvedEventsQuery`, `IConsolidationConnectionFactory` (papéis), `IConsolidationDiagnostics`, saúde e pontos de falha (inertes em produção). | Domain, Infrastructure, EF Core, Npgsql |
+| `src/FinancialTransactions.Consolidation.Worker` | Executável com **dois modos**: serviço (host web mínimo com `/health/live` e `/health/ready` na porta 5120 e o único consumidor) e `--backfill` (coordenador do bootstrap, sem Kestrel e sem consumidor, termina com código de saída). | Consolidation |
+| `src/FinancialTransactions.Consolidation.Api` | API do consolidado diário (porta 5110): duas rotas autenticadas, orçamento por requisição, saúde. | Auth, Consolidation |
 | `tools/FinancialTransactions.DevToken` | Emite um JWT local de desenvolvimento. | pacote de JWT |
 | `tools/FinancialTransactions.LoadTest` | Ensaio de carga e reconciliação. Conversa com a API por HTTP e com o banco por SQL. | pacotes de JWT e Npgsql |
-| `tests/` | Unidade (xUnit) e integração (xUnit, host real da API e PostgreSQL real). | Domain, Infrastructure, Api |
+| `tests/` | Unidade (xUnit) e integração (xUnit, hosts reais da API de lançamentos, do Worker e da API do consolidado, e dois PostgreSQL reais). | todos os projetos acima |
 
 ### Onde cada coisa está
 
@@ -57,6 +77,8 @@ O código está organizado assim, e o desenho acima o reflete:
 - **Escrita:** `Api/Endpoints/MovementEndpoints.cs` é a fronteira HTTP e chama `Api/Movements/RegisterMovementHandler.cs`, o caso de uso. O handler recebe pelo construtor o `FinancialTransactionsDbContext` de Infrastructure, o `AccountAccess`, um `TimeProvider` e o `IRegisterMovementFailurePoints` (ponto de injeção de falha dos testes; em produção só existe `NoFailurePoints`). Os contratos e o parsing da requisição ficam em `Api/Movements/MovementContracts.cs`.
 - **Leitura:** `Api/Endpoints/PositionEndpoints.cs` é a fronteira HTTP **e** orquestra a leitura (autorização, validação de `asOf`, regras de história insuficiente). Ele recebe `PositionQueries` e `TimeProvider` por parâmetro. `Infrastructure/PositionQueries.cs` faz a seleção de contas e a agregação em SQL pelo `DbContext`. Os contratos de resposta ficam em `Api/Positions/PositionContracts.cs`.
 - **Domínio:** `Domain/` não conhece HTTP nem EF Core.
+- **Outbox:** `Domain/OutboxEvent.cs` (o evento, criado por `OutboxEvent.ForMovement`) é adicionado ao mesmo contexto e ao mesmo `SaveChanges` do movimento em `RegisterMovementHandler`; a configuração está em `Infrastructure/Configurations/OutboxEventConfiguration.cs`.
+- **Consolidação:** `Consolidation/DailyConsolidationApplier.cs` aplica um evento (marcador + UPSERT, uma transação); `ConsolidationConsumer.cs` é o laço; `BootstrapCoordinator.cs` e `BootstrapReconciler.cs` fazem a carga inicial; `ConsolidationQueries.cs` e `UnresolvedEventsQuery.cs` servem a API; `Consolidation.Api/DailyConsolidationService.cs` impõe a ordem origem → projeção e o orçamento por requisição.
 
 ### O que separa e o que não separa
 
@@ -133,6 +155,67 @@ sequenceDiagram
 
 O saldo **nunca** é somado em memória a partir de movimentos: o banco devolve uma linha agregada por conta, e a API soma essas parcelas. Conta aberta em `T` e sem movimentos até `T` tem saldo zero (a origem é conhecida); conta aberta depois de `T` não entra na soma e aparece em `excludedAccounts`; se nenhuma conta estava aberta, a resposta é `422 historico_insuficiente`, nunca zero (H6, H7).
 
+### Consolidado diário: do registro à resposta
+
+```mermaid
+sequenceDiagram
+    participant C as Cliente
+    participant W as API de lançamentos
+    participant O as Origem
+    participant K as Worker (consumidor)
+    participant P as Projeção
+    participant Q as API do consolidado
+
+    C->>W: POST movimento
+    W->>O: BEGIN, INSERT movimento, INSERT evento (status 0), COMMIT
+    W-->>C: 201 (independe de tudo o que vem abaixo)
+
+    loop cada ciclo
+        K->>P: lê consolidation_bootstrap (fase)
+        K->>O: SELECT pendentes FOR UPDATE SKIP LOCKED, COMMIT curto
+        K->>P: BEGIN, INSERT processed_events, UPSERT do dia, COMMIT
+        K->>O: UPDATE evento para status 1 (só depois do commit da projeção)
+    end
+
+    C->>Q: GET consolidado do dia
+    Q->>O: 1. titularidade da conta
+    Q->>O: 2. contagem de eventos 0 ou 2 do recorte e observedAt
+    Q->>P: 3. consulta única (fase, linha do dia, acumulado) em conexão nova
+    Q-->>C: 200 com valores da projeção e freshness do instante observedAt
+```
+
+A **Outbox fica na transação do movimento** porque é isso que impede o par "fato sem evento" e "evento sem fato": não existe um instante em que um exista sem o outro, e a falha antes do commit leva os dois. A **marcação de processado vem depois do commit da projeção** porque o contrário permitiria perder um evento (marcado e nunca somado). Pelo caminho escolhido, o pior caso é o inverso, o evento somado e ainda não marcado, e a reentrega é inofensiva: o marcador em `processed_events` faz a segunda aplicação não somar nada. Não se promete "exactly-once" ponta a ponta: a garantia é *pelo menos uma vez* na entrega e *no máximo uma vez* na soma.
+
+### Bootstrap: o conjunto inicial por identidade
+
+O consolidado precisa começar de um estado conhecido, com a escrita de lançamentos **nunca pausada**. O conjunto inicial é finito, definido por identidade (não por data) e capturado em uma visão consistente:
+
+1. O coordenador (`Consolidation.Worker --backfill`) pega o lock consultivo `pg_try_advisory_lock(hashtext('ft_backfill'))` numa sessão própria, sem pool. Se estiver ocupado, sai com código 3.
+2. Lê **os dois lados** sem escrever: o registro de controle da origem (`consolidation_bootstrap_capture`) e a linha `consolidation_bootstrap` do destino. Decide: nenhum dos dois → captura; só a origem → ativa com os valores **da origem** (nunca reenumera, nunca remarca); os dois iguais → nada a fazer (código 0); qualquer divergência → código 4, nada alterado.
+3. **Captura** numa transação `REPEATABLE READ` cujo primeiro comando é `SELECT pg_current_snapshot()`: insere eventos (`origin = 1`) para os movimentos visíveis que ainda não têm, marca `bootstrap_id` em **toda** linha da Outbox cujo movimento é visível no snapshot (inclusive os eventos online criados antes), e grava o registro de controle `{bootstrap_id, member_count, snapshot}` **na mesma transação**, mesmo com conjunto vazio. Movimentos confirmados depois do snapshot ficam com `bootstrap_id` nulo e pertencem a `live`.
+4. **Ativação** no destino por `INSERT ... ON CONFLICT (id) DO NOTHING` em fase `loading`, seguida de releitura e conferência de identidade e contagem. O coordenador **nunca** faz `UPDATE` no destino e não espera consumo.
+
+Captura e ativação ficam em bancos diferentes e não há transação distribuída: por isso toda etapa é repetível **a partir do registro de controle na origem**. Se o commit da captura tem resultado desconhecido (código 5), nada é presumido; a reexecução consulta o registro.
+
+O **serviço** (único consumidor) segue as fases do destino: sem linha válida ele **aguarda sem consumir** (`/health/ready` = `Degraded`, 503); em `loading` consome só os membros do conjunto e, quando nenhum resta pendente ou em quarentena, **reconcilia o mesmo conjunto** (contagem, créditos, débitos, líquido e ids, comparados em memória; a origem agrega por conta e dia com `AT TIME ZONE` do PostgreSQL, uma segunda opinião sobre a conversão feita em .NET); igual, promove `loading → live` numa **única transação local condicional** (`WHERE phase = 'loading'`). Só o serviço promove, e a fase nunca regride.
+
+### Bootstrap e fases (visão de estados)
+
+```mermaid
+flowchart LR
+    s0["Sem captura e sem destino"]
+    s1["Capturado: registro de controle na origem"]
+    s2["Loading: destino ativado"]
+    s3["Live"]
+    s0 -->|"coordenador confirma a captura na origem"| s1
+    s1 -->|"coordenador ativa o destino com INSERT ON CONFLICT DO NOTHING"| s2
+    s2 -->|"serviço consome só os membros do conjunto"| s2
+    s2 -->|"serviço reconcilia o mesmo conjunto e promove com UPDATE condicional"| s3
+    s3 -->|"serviço consome a fila inteira"| s3
+```
+
+Não existe seta de `Live` para `Loading`, nem o coordenador promove: a fase só avança, e só o serviço a avança.
+
 ## Modelo e invariantes
 
 | Tabela | Colunas essenciais |
@@ -140,6 +223,15 @@ O saldo **nunca** é somado em memória a partir de movimentos: o banco devolve 
 | `customers` | `id` (PK), `name`, `created_at` |
 | `accounts` | `id` (PK), `customer_id` (FK), `currency` (`char(3)`), `opened_at` (`timestamptz`) |
 | `movements` | `id` (PK), `account_id` (FK), `type` (`smallint`), `amount` (`numeric(18,2)`), `currency`, `effective_at` e `registered_at` (`timestamptz`), `idempotency_key` (`varchar(128)`), `request_fingerprint` (`char(64)`), `description` (`varchar(140)`, anulável) |
+| `consolidation_outbox` (origem) | `sequence` (identity, PK), `event_id` (UNIQUE, = id do movimento), `account_id`, `customer_id`, `type`, `amount`, `effective_at`, `created_at`, `origin` (0 online, 1 inserido pelo bootstrap: procedência), `bootstrap_id` (pertença ao conjunto inicial), `status` (0 pendente, 1 processado, 2 em quarentena), `attempts`, `last_error`, `processed_at`. Índices `(status, sequence)`, `(bootstrap_id, status)` e `(account_id, status)` |
+| `consolidation_bootstrap_capture` (origem) | linha única (`id = 1`): `bootstrap_id`, `member_count`, `captured_at`, `snapshot` |
+| `daily_account_consolidation` (projeção) | PK `(account_id, business_day)`; `credits`, `debits`, `net` (`numeric(24,2)`), `movement_count`, `max_applied_sequence`, `updated_at`; CHECKs de sinal e de `net = credits - debits` |
+| `processed_events` (projeção) | `event_id` (PK), `sequence`, `account_id`, `processed_at` |
+| `consolidation_bootstrap` (projeção) | linha única (`id = 1`): `bootstrap_id`, `phase` (`loading` ou `live`), `member_count`, `captured_at`, `applied_at`, `reconciled_at` |
+
+### Dimensionamento dos agregados
+
+Cada coluna monetária da projeção é `numeric(24,2)`: o maior valor positivo é 10^22 − 0,01. Com todos os movimentos no teto de 10^9 (H3), cabem **10^13 − 1 = 9.999.999.999.999** movimentos na mesma linha (conta e dia); 10^13 movimentos já excedem. Totais de fechamento e de cliente somam várias linhas e são lidos em `decimal` do .NET (28 a 29 dígitos significativos). Qualquer estouro é uma **exceção observável**: no UPSERT, o PostgreSQL recusa com `22003` (classificado como falha do evento, vai à quarentena depois de 5 tentativas, sem tocar o agregado); na soma em memória, o `decimal` lança `OverflowException`. Nunca há arredondamento, `double` ou saldo substituto. Os testes preparam um valor acumulado no limite em banco descartável (`C7b`), em vez de gerar volume.
 
 Índices de `movements`: `pk_movements`, `ux_movements_account_id_idempotency_key` (UNIQUE `(account_id, idempotency_key)`) e `ix_movements_account_id_effective_at` (`(account_id, effective_at)`).
 
@@ -153,14 +245,14 @@ Uma observação para não superestimar o banco: a coluna `numeric(18,2)` **não
 
 Cada decisão cita onde está no código e o que a verifica. Os nomes de teste são o `DisplayName` (quando existe) seguido do método C#, como aparecem no relatório de testes; a tabela completa está em [verificacao.md](verificacao.md).
 
-### ADR-1 · Serviço único, sem broker, cache nem Outbox (H12)
+### ADR-1 · Registro e posição num processo; consolidação separada, sem broker nem cache (H12, revisada em P07)
 
-- **Contexto:** o recorte é um sistema de registro com uma consulta derivada, num único banco.
-- **Decisão:** uma API ASP.NET Core com EF Core e PostgreSQL. Sem mensageria, cache, Outbox ou microsserviços.
-- **Alternativas:** publicar eventos via Outbox; cache de posição; separar leitura e escrita em serviços.
-- **Consequências:** o sistema inteiro é verificável com um banco e um processo; não há consumidores, então não há o que notificar. Não há tolerância a falha do banco além do `503` (ADR-6).
-- **Revisão:** se surgir um consumidor externo dos movimentos, ou se a leitura passar a dominar a carga (ver ADR-2).
-- **Onde:** `src/FinancialTransactions.Api/Program.cs`. **Verificação:** o ensaio de carga ([carga.md](carga.md)) e toda a suíte de integração rodam esse desenho contra PostgreSQL real; `Composition_ProductionHost_ResolvesNoFailurePoints` (`CompositionProductionHostResolvesNoFailurePoints`) confere que o host de produção não carrega pontos de falha.
+- **Contexto:** até P06, o recorte era um sistema de registro com uma consulta derivada, num único banco e num processo. A orientação complementar passou a exigir que o registro continue disponível quando o consolidado diário estiver fora (ver "Fontes e procedência" em [escopo.md](escopo.md)). Isso é incompatível com um consolidado calculado dentro do mesmo processo e do mesmo banco da escrita.
+- **Decisão:** a escrita e a posição por instante continuam numa API ASP.NET Core com EF Core e PostgreSQL. O consolidado diário vive em **outros processos** (Worker e API do consolidado) e em **outro banco**, alimentado por uma Outbox transacional na origem (ADR-10). Continuam fora: broker, cache, posição materializada na origem, Aspire e orquestração.
+- **Alternativas:** manter tudo num processo (descartada: viola o requisito de independência); Worker hospedado dentro da API de lançamentos (descartada: a queda do processo derrubaria os dois); chamada HTTP síncrona da escrita para a consolidação (descartada: acopla a disponibilidade); cache de posição.
+- **Consequências:** o registro de lançamentos não depende de nada do consolidado, o que é verificado por cenário (C1 a C5). O custo é operacional (três processos, dois bancos) e semântico: o consolidado é **eventualmente consistente** e precisa dizer o quanto (ADR-11).
+- **Revisão:** se o volume de eventos exigir mais de um consumidor (reserva durável, ciclo P08), ou se surgir um consumidor externo (ADR-10).
+- **Onde:** `src/FinancialTransactions.Api/Program.cs` (escrita) e `src/FinancialTransactions.Consolidation.*` (consolidado). **Verificação:** o ensaio de carga ([carga.md](carga.md)) e a suíte de integração rodam esse desenho contra PostgreSQL real; `Composition_ProductionHost_ResolvesNoFailurePoints` e `Composition_ProductionWorker_HasNoTestFailurePointsFactoryOrSink` conferem que os hosts de produção não carregam pontos de falha, e `ProjectGraph_AuthReferencesNothing_NoCycle_ApisDoNotReferenceEachOther` confere que a API de lançamentos não referencia a consolidação.
 
 ### ADR-2 · Posição por SUM no banco, sem saldo materializado
 
@@ -196,7 +288,7 @@ Cada decisão cita onde está no código e o que a verifica. Os nomes de teste s
 - **Alternativas:** provedor de identidade real (OIDC); chave assimétrica com JWKS; `403` para fora do escopo.
 - **Consequências:** simples de reproduzir localmente; o emissor é uma ferramenta de desenvolvimento (`DevToken`), não um serviço de identidade. A chave simétrica é compartilhada entre quem emite e quem valida.
 - **Revisão:** qualquer uso fora de laboratório (rotação de chave, emissor real).
-- **Onde:** `src/FinancialTransactions.Api/Program.cs`, `Api/Auth/` (`AccountAccess`, `CustomerScope`, `AuthDefaults`). **Verificação:** `T11_NoToken_Is401`, `T11b_OtherCustomer_Is404_EvenOnReplay`, `T11c_InvalidTokens_Are401_NothingPersisted`, `T11c_ControlToken_IsAccepted`, `T12_Selection_OtherAccountAndOtherCustomerDoNotLeak`.
+- **Onde:** `src/FinancialTransactions.Auth/` (`AddFinancialTransactionsJwt`, `CustomerScope`, `AuthDefaults`, extraídos da API em P07 para serem compartilhados), `Api/Auth/AccountAccess.cs` (acesso a dados, fica na API de lançamentos) e `Api/Program.cs`. A API do consolidado usa o mesmo JWT e lê a titularidade da conta na origem. **Verificação:** `T11_NoToken_Is401`, `T11b_OtherCustomer_Is404_EvenOnReplay`, `T11c_InvalidTokens_Are401_NothingPersisted`, `T11c_ControlToken_IsAccepted`, `T12_Selection_OtherAccountAndOtherCustomerDoNotLeak`.
 
 ### ADR-6 · `503` classificado em vez de retry automático
 
@@ -205,7 +297,7 @@ Cada decisão cita onde está no código e o que a verifica. Os nomes de teste s
 - **Alternativas:** retry automático no servidor; circuit breaker; resposta degradada.
 - **Consequências:** a decisão de repetir é do cliente, e a idempotência torna a repetição segura: se a tentativa que recebeu `503` não chegou ao commit, a repetição cria; se chegou, devolve `200` com o mesmo movimento.
 - **Revisão:** se houver necessidade de absorver quedas curtas sem o cliente perceber.
-- **Onde:** `src/FinancialTransactions.Api/Http/ApiExceptionHandler.cs` (`IsDependencyUnavailable`). **Verificação:** `T13a_PostWhenDatabaseUnreachable_Is503_WithinDeadline`, `T13b_GetPositionWhenDatabaseUnreachable_Is503_NotZero`, os cinco testes de unidade `IsDependencyUnavailable_*`, e a sondagem de reinício do PostgreSQL contra a API real ([verificacao.md](verificacao.md)).
+- **Onde:** `src/FinancialTransactions.Api/Http/ApiExceptionHandler.cs` (`IsDependencyUnavailable`, que desde P07 delega a `Infrastructure/DependencyFailure.cs`, a classificação única usada também pelo Worker e pela API do consolidado). **Verificação:** `T13a_PostWhenDatabaseUnreachable_Is503_WithinDeadline`, `T13b_GetPositionWhenDatabaseUnreachable_Is503_NotZero`, os cinco testes de unidade `IsDependencyUnavailable_*`, e a sondagem de reinício do PostgreSQL contra a API real ([verificacao.md](verificacao.md)).
 
 ### ADR-7 · Limite de corpo e health checks sem detalhe
 
@@ -234,13 +326,56 @@ Cada decisão cita onde está no código e o que a verifica. Os nomes de teste s
 - **Revisão:** mesma condição do ADR-2; avaliar primeiro um índice de cobertura e só depois uma posição derivada.
 - **Onde:** `Infrastructure/Configurations/MovementConfiguration.cs`. **Verificação:** ensaio de carga e planos (`EXPLAIN`) em [carga.md](carga.md), seção "Planos das consultas".
 
+### ADR-10 · Worker com trabalho durável no banco × broker
+
+- **Contexto:** o consolidado precisa receber os fatos sem que a escrita espere por ele nem o perca quando ele estiver fora do ar. Há dois bancos, então o evento atravessa uma fronteira que uma transação local não cobre.
+- **Decisão:** **Outbox transacional**: o evento é gravado na mesma transação do movimento (`consolidation_outbox`); um Worker lê os pendentes (`FOR UPDATE SKIP LOCKED` numa transação curta que termina antes de tocar a projeção), aplica na projeção (marcador `processed_events` + UPSERT na **mesma** transação) e só depois marca o evento como processado na origem. Consumidor único e sequencial nesta fatia (declarado); sem reserva durável nem segunda instância (ciclo P08).
+- **Alternativas:** broker de mensagens (RabbitMQ, Service Bus, Kafka); CDC; chamada HTTP síncrona; fila em memória; Worker dentro da API de lançamentos.
+- **Por que não broker agora:** com um produtor, um consumidor e um banco de origem, o broker acrescentaria uma dependência de infraestrutura e um segundo ponto de falha entre o fato e o evento (publicar depois do commit é uma Outbox de qualquer jeito). A Outbox no banco resolve o problema com o que já existe e é verificável com um PostgreSQL local.
+- **Condição de adoção do broker (revisão):** mais de um consumidor independente do mesmo fato; consumidores fora da equipe ou da rede; volume que torne o *polling* da Outbox o gargalo medido; necessidade de ordenação ou reprocessamento por partição. Nesse caso a Outbox permanece como origem do evento e passa a alimentar um publicador (relay), sem mudar a transação do registro.
+- **Consequências:** garantia *pelo menos uma vez* na entrega e *no máximo uma vez* na soma (marcador). Entrega atrasada é possível e declarada (ADR-11). A Outbox cresce; sua retenção é pendência (P08).
+- **Onde:** `RegisterMovementHandler`, `OutboxEventConfiguration`, `OutboxConsolidationSource`, `ConsolidationConsumer`, `DailyConsolidationApplier`. **Verificação:** `C10`/`C15a`/`C15b`/`C15c` (Outbox na transação do movimento), `C6a`/`C6b`/`C7`/`C7b` (atomicidade da projeção e reentrega sem nova soma), `C1` a `C5` (independência e recuperação).
+
+### ADR-11 · Estado de atualização conservador (`freshness`)
+
+- **Contexto:** o consolidado é eventualmente consistente. Uma resposta que afirmasse completude sem prová-la seria pior que nenhuma.
+- **Decisão:** a resposta leva `observedAt`, `unresolvedEvents`, `failedEvents`, `stale` e `freshness`. A API **lê a origem primeiro** (eventos da Outbox das contas do recorte, **de qualquer dia**, com `status` 0 ou 2; `observedAt` é o `clock_timestamp()` da origem) e **só depois** abre, em conexão nova e `READ COMMITTED`, a consulta única à projeção (fase do bootstrap, linha do dia e acumulado até o dia, numa mesma instrução SQL).
+  - `complete`: no instante `observedAt` **não havia eventos não confirmados** para o recorte; o corpo reflete a projeção lida depois desse instante; lançamentos posteriores a `observedAt` podem não constar.
+  - `stale`: havia eventos não confirmados. É conservador: um evento já somado mas ainda não marcado na origem conta como não resolvido.
+  - `unknown`: a leitura diagnóstica da origem falhou **depois** de a autorização ter sido obtida e a projeção ainda pôde ser consultada dentro do orçamento restante; `unresolvedEvents`, `failedEvents`, `stale` e `observedAt` ficam nulos.
+  - Nunca `complete` com quarentena no recorte (a quarentena é `status = 2`, contada em `unresolvedEvents`).
+  - `maxAppliedSequence` é o **máximo observado** entre as linhas do recorte, não uma fronteira completa.
+- **Alternativas:** devolver só o valor; ler a projeção antes da origem (o contador poderia dizer "completo" para um corpo anterior a um commit); uma transação `REPEATABLE READ` abrangendo as duas leituras (impossível: são bancos diferentes).
+- **Consequências:** a ordem importa e tem teste: com a API pausada entre as duas leituras, o Worker confirma o evento (projeção e origem) e a resposta sai com `stale` (observação inicial) **e** o valor novo (a projeção é aberta depois dos commits). O contador descreve o passado; o valor, o momento da consulta.
+- **Orçamento:** `CancellationTokenSource` de 1,5 s por requisição encadeado ao `RequestAborted`; strings de conexão da API com `Timeout=1;Command Timeout=1`. Abandono do cliente (`RequestAborted`) é distinto de orçamento estourado: o primeiro é registrado e não responde corpo; o segundo é `503 dependency_unavailable`. A meta de resposta de falha em até 2 s é **hipótese do projeto**, exercitada para o modo conexão recusada; o modo "aceita e não responde" não foi exercitado.
+- **Onde:** `Consolidation.Api/DailyConsolidationService.cs`, `Consolidation/ConsolidationQueries.cs`, `UnresolvedEventsQuery`. **Verificação:** `C1`, `C2`, `C11b`, `C12a`, `C14` (a corrida), `Freshness_OriginDiagnosticReadFailsAfterAuthorization_IsUnknownWithNullCounters`, `RequestBudget_ExceededWhilePaused_Is503DependencyUnavailable_NotAbandoned`, `RequestAborted_ByTheClient_IsLoggedAsAbandoned_NotAsDependencyFailure`.
+
+### ADR-12 · Dia de negócio em fuso nomeado
+
+- **Contexto:** "consolidado diário" depende de qual dia um instante pertence. Um offset fixo erraria em datas históricas com horário de verão.
+- **Decisão:** dia de negócio = data civil do `effectiveAt` convertido para a zona **nomeada** `America/Sao_Paulo` (`TimeZoneInfo.FindSystemTimeZoneById`). Início às 00:00 local; fim **exclusivo** às 00:00 local do dia seguinte (`2026-09-02T02:59:59.999999Z` é 01/09; `2026-09-02T03:00:00Z` é 02/09). Conta incluída no dia D: `openedAt` anterior ao fim exclusivo de D. A zona é validada na inicialização.
+- **Alternativas:** UTC; offset fixo −03:00; dia de calendário do cliente.
+- **Consequências:** depende dos dados de fuso da máquina. No Windows (máquina de desenvolvimento) o .NET resolve `America/Sao_Paulo` pelo registro de fusos do sistema; em Linux, pelo `tzdata` do IANA. A reconciliação do bootstrap agrega a origem com o `AT TIME ZONE` do PostgreSQL, uma segunda fonte; divergência entre as duas tabelas apareceria como divergência da reconciliação (a fase não chega a `live`). **Medido em 19/10/2026:** 473.329 instantes de 2000-01-01 a 2026-12-31 (passo de 30 min) comparados entre o .NET desta máquina e o PostgreSQL: **0 divergências de 2004 a 2026** e 212 em 2000 a 2003 (o registro do Windows não traz as regras daqueles anos como o IANA). As contas do seed abrem em 2026 e H5 impede `effectiveAt` anterior à abertura, então a faixa divergente não ocorre hoje; o limite fica declarado. Hipótese do projeto (D2), não requisito do contratante.
+- **Revisão:** se o contratante definir outro critério de dia.
+- **Onde:** `Consolidation/BusinessDay.cs`. **Verificação:** `BusinessDay_Of_RespectsTheLocalMidnightBoundary`, `BusinessDay_Of_ValidForHistoricalDaylightSavingDates` (inclusive a meia-noite que não existiu em 04/11/2018), `DayBoundary_AccountOpenedBeforeEndOfLocalDay_IsIncluded_OpenedAfter_IsHistoricoInsuficiente`.
+
+### ADR-13 · Classes de falha do consumidor
+
+- **Contexto:** um laço que trata toda falha igual ou põe em quarentena eventos bons por causa de um banco fora do ar, ou repete para sempre um evento defeituoso.
+- **Decisão:** quatro classes, por exceção e por tentativa (`FailureClassifier`): **transitória** (infraestrutura não respondeu, timeout de comando, orçamento interno estourado), **cancelamento do host** (sai limpo), **ambiente** (SQLSTATE 42, 28, 3D, 53, demais 22, violação de qualquer constraint fora da lista fechada, erro de mapeamento, ou **exceção desconhecida**) e **evento** (validação do próprio evento, overflow `22003`, ou constraint da lista fechada). Transitória e ambiente **não** contam tentativa, abandonam o lote e entram em *backoff* exponencial de 1 s a 30 s (reinicia em 500 ms depois do primeiro sucesso); ambiente também põe o `/health/ready` do Worker em `Degraded` (503) até o primeiro ciclo bem-sucedido depois dela. Evento conta tentativa; na quinta vai à quarentena com `last_error` sanitizado (tipo, SQLSTATE e constraint, nunca connection string, corpo nem `ToString()` da exceção). A atribuição ao evento é concreta, nunca por exclusão. Se a confirmação na origem falha depois do commit da projeção, nada é forçado: a próxima leitura determina o estado e a reentrega não soma de novo.
+- **Alternativas:** *retry* com contador único; quarentena de tudo o que falha mais de N vezes; `BackgroundServiceExceptionBehavior.Ignore`.
+- **Consequências:** um banco sem esquema (42P01) nunca manda evento para a quarentena. Uma exceção nunca vista é tratada como ambiente (falha segura: não descarta dados).
+- **Onde:** `Consolidation/FailureClassifier.cs`, `ConsolidationConsumer.cs`. **Verificação:** os testes de unidade `Classifier_*`, `Backoff_Production1sTo30sCap_ThenResets`, `HealthState_*`, e `C4`, `C12a`, `C12b`, `C6a`, `C6b`.
+
 ## Segurança e dados
 
 Proporcional ao desenho; nenhuma conformidade regulatória é alegada.
 
 **O que protege:**
 
-- token por cliente (`customer_id`) e autorização por recurso, com `404` fora do escopo (ADR-5);
+- token por cliente (`customer_id`) e autorização por recurso, com `404` fora do escopo (ADR-5), nas duas APIs. O consolidado lê a titularidade da conta **na origem** (dependência declarada no diagrama); `unresolvedEvents` é sempre filtrado pelas contas do recorte autorizado, então não vaza eventos de outro cliente (`C11b`);
+- `last_error` da Outbox guarda só o tipo, o SQLSTATE e o nome da constraint, nunca connection string, corpo, token nem `ToString()` da exceção; as mensagens de configuração inválida não ecoam o valor recebido;
+- parâmetro `day` estrito (`YYYY-MM-DD`), dia futuro recusado, e `404` (não `403`) para conta de outro cliente;
 - logs **da aplicação** sem corpo, `Authorization`, `Idempotency-Key` bruta, connection string nem chave: o registro de um movimento gera `MovementRegistered` com identificadores, a indisponibilidade gera `DependencyUnavailable` com método, rota e `traceId`; um teste de integração captura os logs de um POST, uma repetição, um `422` e um `401` e procura esses valores (`Logs_DoNotContainSecretsOrBodies`);
 - chave de assinatura fora do repositório (variável de ambiente ou user-secrets);
 - dados do repositório e do ensaio **sintéticos**; a credencial do banco `ft_local_dev_only` é de laboratório e está em arquivos versionados de propósito (composição Docker, configuração de desenvolvimento, documentação e workflow de CI);
@@ -273,7 +408,8 @@ Nada desta seção está implementado. São propostas, cada uma com o que ganha,
    - *Ganha:* testar as janelas de 5 minutos e a fronteira de `asOf` sem depender do relógio real.
    - *Custa:* trocar o registro no host de teste e ajustar os testes existentes.
    - *Deixa de ser necessário se:* as regras de janela forem cobertas só em unidade (`MovementRulesTests` já as cobre com `now` explícito).
-4. **Publicação de eventos com Outbox.** *Ganha:* notificar consumidores sem perder eventos nem duplicar sob falha. *Custa:* tabela de Outbox, processo de despacho, idempotência no consumidor. *Deixa de ser necessário se:* não existir consumidor (situação atual, H12).
+4. **Publicação de eventos para consumidores externos (broker).** A Outbox já existe, mas serve **só** à consolidação interna (ADR-10). *Ganha:* notificar outros consumidores sem acoplar a escrita a eles. *Custa:* broker, relay a partir da Outbox, idempotência em cada consumidor, retenção e limpeza da Outbox. *Deixa de ser necessário se:* não existir consumidor externo.
+   - **Nesta fatia ainda não existem** (ciclos seguintes): reserva durável e mais de um Worker ou API do consolidado; reprocessamento administrativo da quarentena; métricas; reverificação ampla da projeção viva e reconstrução de um destino perdido; ensaio dos 50 req/s com 5% de perda; e a arquitetura de alta disponibilidade (pontos de falha, recuperação e escala horizontal). O estado de cada adequação sugerida está em [verificacao.md](verificacao.md).
 5. **Posição derivada com reconciliação.** Se o volume de movimentos por conta crescer por ordens de grandeza (condição em [carga.md](carga.md)), manter um saldo derivado atualizado e uma reconciliação periódica contra a soma dos movimentos. *Ganha:* leitura em tempo constante. *Custa:* coerência a provar, reprocessamento. *Deixa de ser necessário se:* a consulta indexada continuar dentro da meta.
 6. **Observabilidade com OpenTelemetry.** *Ganha:* traços e métricas por requisição, em vez de logs soltos. *Custa:* coletor e disciplina de atributos sem dados sensíveis. *Deixa de ser necessário se:* a operação se resumir a um ambiente de laboratório.
 7. **Rotação de chave, JWKS e emissor real.** *Ganha:* identidade de produção, chaves sem segredo compartilhado. *Custa:* dependência de um provedor de identidade. *Deixa de ser necessário se:* o serviço ficar restrito a laboratório.

@@ -9,6 +9,8 @@ public sealed class FinancialTransactionsDbContext(DbContextOptions<FinancialTra
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<Movement> Movements => Set<Movement>();
+    public DbSet<OutboxEvent> OutboxEvents => Set<OutboxEvent>();
+    public DbSet<BootstrapCapture> BootstrapCaptures => Set<BootstrapCapture>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -23,5 +25,7 @@ public sealed class FinancialTransactionsDbContext(DbContextOptions<FinancialTra
         modelBuilder.ApplyConfiguration(new CustomerConfiguration());
         modelBuilder.ApplyConfiguration(new AccountConfiguration());
         modelBuilder.ApplyConfiguration(new MovementConfiguration());
+        modelBuilder.ApplyConfiguration(new OutboxEventConfiguration());
+        modelBuilder.ApplyConfiguration(new BootstrapCaptureConfiguration());
     }
 }
