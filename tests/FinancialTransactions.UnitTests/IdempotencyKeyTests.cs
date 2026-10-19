@@ -26,6 +26,19 @@ public class IdempotencyKeyTests
     }
 
     [Fact]
+    public void FingerprintIsStableAcrossMicrosecondTruncation()
+    {
+        // 7 dígitos de fração (100 ns) e o valor de 6 dígitos que o 201 devolve após o truncamento.
+        var sevenDigits = DateTimeOffset.Parse("2026-09-01T12:00:00.1234567Z", CultureInfo.InvariantCulture);
+        var sixDigits = DateTimeOffset.Parse("2026-09-01T12:00:00.123456Z", CultureInfo.InvariantCulture);
+
+        var first = IdempotencyKey.Fingerprint(MovementType.Credit, Amount("100"), sevenDigits, null);
+        var second = IdempotencyKey.Fingerprint(MovementType.Credit, Amount("100"), sixDigits, null);
+
+        Assert.Equal(first, second);
+    }
+
+    [Fact]
     public void FingerprintDiffersWhenDescriptionDiffers()
     {
         var at = DateTimeOffset.Parse("2026-09-01T12:00:00Z", CultureInfo.InvariantCulture);

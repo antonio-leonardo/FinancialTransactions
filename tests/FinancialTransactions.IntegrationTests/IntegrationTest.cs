@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -16,7 +17,8 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
     protected static readonly Guid AccountA2 = Guid.Parse("aaaaaaa2-0000-0000-0000-000000000002");
     protected static readonly Guid AccountB1 = Guid.Parse("bbbbbbb1-0000-0000-0000-000000000001");
 
-    private readonly HashSet<Guid> _usedAccounts = [];
+    // Coleção segura para uso concorrente: os cenários T06 e T08 enviam POSTs de várias tarefas ao mesmo tempo.
+    private readonly ConcurrentDictionary<Guid, byte> _usedAccounts = new();
 
     protected PostgresFixture Fixture { get; } = fixture;
 
@@ -35,7 +37,7 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
     protected async Task<HttpResponseMessage> PostMovementAsync(HttpClient client, Guid accountId, string? idempotencyKey, object body)
     {
         ArgumentNullException.ThrowIfNull(client);
-        _usedAccounts.Add(accountId);
+        _usedAccounts.TryAdd(accountId, 0);
         // A requisição só pode ser descartada depois do envio concluído; por isso o await fica aqui dentro.
         using var request = new HttpRequestMessage(HttpMethod.Post, Relative($"/api/v1/accounts/{accountId}/movements"));
         if (idempotencyKey is not null)
@@ -51,7 +53,7 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
     protected async Task<HttpResponseMessage> PostRawAsync(HttpClient client, Guid accountId, string? idempotencyKey, string json)
     {
         ArgumentNullException.ThrowIfNull(client);
-        _usedAccounts.Add(accountId);
+        _usedAccounts.TryAdd(accountId, 0);
         using var request = new HttpRequestMessage(HttpMethod.Post, Relative($"/api/v1/accounts/{accountId}/movements"));
         if (idempotencyKey is not null)
         {
@@ -60,6 +62,67 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
 
         request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         return await client.SendAsync(request);
+    }
+
+    /// <summary>
+    /// Largada coordenada: cria <paramref name="count"/> tarefas, espera todas chegarem ao portão comum e libera todas
+    /// de uma vez. Sem laço paralelo do framework e sem atraso temporizado. A limpeza por conta só roda depois do <c>WhenAll</c>.
+    /// </summary>
+    protected static async Task<HttpResponseMessage[]> FireConcurrentlyAsync(int count, Func<int, Task<HttpResponseMessage>> request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var arrived = Enumerable.Range(0, count)
+            .Select(_ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously))
+            .ToArray();
+
+        var tasks = Enumerable.Range(0, count).Select(index => Task.Run(async () =>
+        {
+            arrived[index].SetResult();
+            await gate.Task;
+            return await request(index);
+        })).ToArray();
+
+        // Todas as tarefas já estão paradas no portão antes da liberação.
+        await Task.WhenAll(arrived.Select(a => a.Task));
+        gate.SetResult();
+        return await Task.WhenAll(tasks);
+    }
+
+    /// <summary>Largada coordenada em que cada tarefa usa o próprio <see cref="HttpClient"/> da factory; os clientes são descartados ao final.</summary>
+    protected async Task<HttpResponseMessage[]> FireConcurrentlyAsync(int count, Guid customerId, Func<HttpClient, int, Task<HttpResponseMessage>> request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var clients = Enumerable.Range(0, count).Select(_ => ClientFor(customerId)).ToArray();
+        try
+        {
+            return await FireConcurrentlyAsync(count, index => request(clients[index], index));
+        }
+        finally
+        {
+            foreach (var client in clients)
+            {
+                client.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Lê status e corpo de cada resposta e a descarta.</summary>
+    private protected static async Task<IReadOnlyList<ResponseSnapshot>> SnapshotAsync(HttpResponseMessage[] responses)
+    {
+        ArgumentNullException.ThrowIfNull(responses);
+        var snapshots = new List<ResponseSnapshot>(responses.Length);
+        foreach (var response in responses)
+        {
+            using (response)
+            {
+                snapshots.Add(new ResponseSnapshot(response.StatusCode, await response.Content.ReadAsStringAsync()));
+            }
+        }
+
+        return snapshots;
     }
 
     protected static object Credit(string amount, string effectiveAt, string? description = null) =>
@@ -100,16 +163,32 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_usedAccounts.Count == 0)
+        if (_usedAccounts.IsEmpty)
         {
             return;
         }
 
         await using var connection = Fixture.OpenTestConnection();
         await using var command = new NpgsqlCommand("DELETE FROM movements WHERE account_id = ANY(@ids)", connection);
-        command.Parameters.AddWithValue("ids", _usedAccounts.ToArray());
+        command.Parameters.AddWithValue("ids", _usedAccounts.Keys.ToArray());
         await command.ExecuteNonQueryAsync();
     }
+}
+
+/// <summary>Status e corpo (texto) de uma resposta já descartada.</summary>
+internal sealed record ResponseSnapshot(System.Net.HttpStatusCode Status, string Body)
+{
+    public string? Code
+    {
+        get
+        {
+            using var document = JsonDocument.Parse(Body);
+            return document.RootElement.TryGetProperty("code", out var code) ? code.GetString() : null;
+        }
+    }
+
+    public MovementDto Movement => JsonSerializer.Deserialize<MovementDto>(Body, JsonSerializerOptions.Web)
+        ?? throw new InvalidOperationException("Corpo sem movimento.");
 }
 
 internal sealed record MovementDto(Guid MovementId, Guid AccountId, string Type, decimal Amount, string Currency, DateTimeOffset EffectiveAt, DateTimeOffset RegisteredAt);

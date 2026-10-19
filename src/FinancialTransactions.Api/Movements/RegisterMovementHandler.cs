@@ -18,6 +18,7 @@ public sealed class RegisterMovementHandler(
     FinancialTransactionsDbContext db,
     AccountAccess access,
     TimeProvider clock,
+    IRegisterMovementFailurePoints failurePoints,
     ILogger<RegisterMovementHandler> logger)
 {
     public const string IdempotencyKeyRequired = "idempotency_key_required";
@@ -105,14 +106,12 @@ public sealed class RegisterMovementHandler(
             try
             {
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                await failurePoints.BeforeCommitAsync(cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                await failurePoints.AfterCommitAsync(cancellationToken).ConfigureAwait(false);
                 return RegisterMovementResult.Created(movement);
             }
-            catch (DbUpdateException ex) when (ex.InnerException is PostgresException
-            {
-                SqlState: PostgresErrorCodes.UniqueViolation,
-                ConstraintName: MovementConfiguration.IdempotencyUniqueConstraintName,
-            })
+            catch (DbUpdateException ex) when (IsIdempotencyConflict(ex))
             {
                 // 23505 exatamente na UNIQUE (account_id, idempotency_key): a transação PostgreSQL está abortada e
                 // não aceita novas consultas. Reverter aqui; a releitura acontece fora dela, abaixo. Qualquer outra
@@ -139,6 +138,20 @@ public sealed class RegisterMovementHandler(
         return string.Equals(existing.RequestFingerprint, fingerprint, StringComparison.Ordinal)
             ? RegisterMovementResult.Replayed(existing)
             : RegisterMovementResult.Rejected(IdempotencyKeyConflict, "Idempotency-Key já usada nesta conta com conteúdo diferente.");
+    }
+
+    /// <summary>
+    /// Verdadeiro só para a violação única (23505) da constraint de idempotência. Qualquer outra violação, de outra
+    /// constraint ou de outro SqlState, não é repetição e segue como falha inesperada.
+    /// </summary>
+    public static bool IsIdempotencyConflict(DbUpdateException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: MovementConfiguration.IdempotencyUniqueConstraintName,
+        };
     }
 
     private static string KeyHashPrefix(string key)

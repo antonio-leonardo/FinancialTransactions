@@ -99,5 +99,9 @@ public sealed class AuthorizationValidationAndQueryTests(PostgresFixture fixture
         Assert.Contains("SUM(", sql, StringComparison.Ordinal);
         Assert.Contains("effective_at <=", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*)", sql, StringComparison.Ordinal);
-    }
+
+        // O sinal é fragmento de texto no SQL; conta e corte são parâmetros, nunca texto.
+        Assert.Contains("CASE m.type WHEN 1 THEN m.amount ELSE -m.amount END", sql, StringComparison.Ordinal);
+        Assert.Contains("m.account_id = @p0", sql, StringComparison.Ordinal);
+        Assert.Contains("m.effective_at <= @p1", sql, StringComparison.Ordinal);    }
 }

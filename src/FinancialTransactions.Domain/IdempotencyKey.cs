@@ -48,15 +48,17 @@ public static class IdempotencyKey
     }
 
     /// <summary>
-    /// SHA-256, em hexadecimal minúsculo, de "{type}|{amount:F2}|{effectiveAt em UTC, formato O}|{description ou vazio}",
-    /// com cultura invariante. O mesmo instante em offsets diferentes produz o mesmo fingerprint.
+    /// SHA-256, em hexadecimal minúsculo, de "{type}|{amount:F2}|{effectiveAt normalizado, formato O}|{description ou vazio}",
+    /// com cultura invariante. O instante passa por <see cref="Movement.NormalizeForPersistence"/> (UTC, microssegundos):
+    /// o mesmo instante em offsets diferentes, ou com 7 e 6 dígitos de fração depois do truncamento, produz o mesmo
+    /// fingerprint, de modo que um corpo reconstruído a partir da resposta 201 replaye com 200.
     /// </summary>
     public static string Fingerprint(MovementType type, MovementAmount amount, DateTimeOffset effectiveAt, string? description)
     {
         ArgumentNullException.ThrowIfNull(amount);
         var canonical = string.Create(
             CultureInfo.InvariantCulture,
-            $"{type}|{amount.Value:F2}|{effectiveAt.ToUniversalTime():O}|{description ?? string.Empty}");
+            $"{type}|{amount.Value:F2}|{Movement.NormalizeForPersistence(effectiveAt):O}|{description ?? string.Empty}");
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 }

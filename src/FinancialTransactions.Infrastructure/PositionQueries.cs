@@ -16,22 +16,37 @@ public sealed record AccountPosition(Guid AccountId, decimal Balance, long Movem
 public sealed record CustomerAggregate(IReadOnlyList<AccountPosition> Accounts, IReadOnlyList<Account> ExcludedAccounts);
 
 /// <summary>
-/// Posição calculada no banco por SUM/COUNT (H12). SQL parametrizado via FormattableString: os valores
-/// interpolados viram parâmetros Npgsql, nunca texto. Nenhum movimento é materializado em memória.
+/// Posição calculada no banco por SUM/COUNT (H12). SQL parametrizado: o sinal do movimento entra como fragmento
+/// constante (<see cref="SignedAmountSql"/>) e os valores (conta, corte) entram como parâmetros Npgsql posicionais
+/// (<c>{0}</c>, <c>{1}</c>), nunca como texto. Nenhum movimento é materializado em memória.
 /// </summary>
 public sealed class PositionQueries(FinancialTransactionsDbContext db)
 {
+    /// <summary>Fragmento constante e único do sinal em SQL (crédito positivo, débito negativo); espelha <c>MovementRules.SignedAmount</c>.</summary>
+    private const string SignedAmountSql = "CASE m.type WHEN 1 THEN m.amount ELSE -m.amount END";
+
+    private const string AccountAggregateSql = $$"""
+        SELECT SUM({{SignedAmountSql}}) AS "Sum",
+               COUNT(*) AS "MovementCount"
+        FROM movements AS m
+        WHERE m.account_id = {0} AND m.effective_at <= {1}
+        """;
+
+    private const string CustomerAggregateSql = $$"""
+        SELECT m.account_id AS "AccountId",
+               SUM({{SignedAmountSql}}) AS "Sum",
+               COUNT(*) AS "MovementCount"
+        FROM movements AS m
+        WHERE m.account_id = ANY({0}) AND m.effective_at <= {1}
+        GROUP BY m.account_id
+        """;
+
     /// <summary>Consulta composável exposta para prova de tradução (ToQueryString) e para a posição por conta.</summary>
     public IQueryable<AccountAggregate> AccountAggregateQuery(Guid accountId, DateTimeOffset asOf)
     {
         // timestamptz exige DateTimeOffset com offset zero no parâmetro.
         var asOfUtc = asOf.ToUniversalTime();
-        return db.Database.SqlQuery<AccountAggregate>($"""
-            SELECT SUM(CASE m.type WHEN 1 THEN m.amount ELSE -m.amount END) AS "Sum",
-                   COUNT(*) AS "MovementCount"
-            FROM movements AS m
-            WHERE m.account_id = {accountId} AND m.effective_at <= {asOfUtc}
-            """);
+        return db.Database.SqlQueryRaw<AccountAggregate>(AccountAggregateSql, accountId, asOfUtc);
     }
 
     /// <summary>SUM e COUNT de uma conta até <paramref name="asOf"/> (fronteira inclusiva, H4). Sempre uma linha.</summary>
@@ -67,14 +82,8 @@ public sealed class PositionQueries(FinancialTransactionsDbContext db)
 
         var includedIds = included.Select(a => a.Id).ToArray();
         var asOfUtc = asOf.ToUniversalTime();
-        var rows = await db.Database.SqlQuery<CustomerAccountAggregate>($"""
-            SELECT m.account_id AS "AccountId",
-                   SUM(CASE m.type WHEN 1 THEN m.amount ELSE -m.amount END) AS "Sum",
-                   COUNT(*) AS "MovementCount"
-            FROM movements AS m
-            WHERE m.account_id = ANY({includedIds}) AND m.effective_at <= {asOfUtc}
-            GROUP BY m.account_id
-            """).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var rows = await db.Database.SqlQueryRaw<CustomerAccountAggregate>(CustomerAggregateSql, includedIds, asOfUtc)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var byAccount = rows.ToDictionary(r => r.AccountId);
         var positions = included

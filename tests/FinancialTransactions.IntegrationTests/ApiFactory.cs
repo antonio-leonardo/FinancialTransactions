@@ -1,13 +1,20 @@
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
+using FinancialTransactions.Api.Movements;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
 namespace FinancialTransactions.IntegrationTests;
+
+/// <summary>Variações de um token válido; cada propriedade fora do padrão invalida o token por um motivo.</summary>
+public sealed record TokenVariation(string Audience = "financialtransactions-api", bool IncludeCustomerId = true, string? SigningKey = null);
 
 /// <summary>Sobe a API real contra o banco de teste, com chave de assinatura gerada por execução.</summary>
 public sealed class ApiFactory(string connectionString, string signingKey) : WebApplicationFactory<Program>
@@ -31,19 +38,59 @@ public sealed class ApiFactory(string connectionString, string signingKey) : Web
         return client;
     }
 
+    /// <summary>
+    /// Factory derivada cujo ponto de falha do registro é o informado (só no host de teste; produção usa
+    /// <c>NoFailurePoints</c>). O chamador descarta a factory devolvida.
+    /// </summary>
+    public WebApplicationFactory<Program> WithFailurePoints(IRegisterMovementFailurePoints failurePoints)
+    {
+        ArgumentNullException.ThrowIfNull(failurePoints);
+        return WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<IRegisterMovementFailurePoints>();
+            services.AddSingleton(failurePoints);
+        }));
+    }
+
+    /// <summary>Cliente autenticado como o cliente informado, a partir de qualquer factory derivada.</summary>
+    public HttpClient AuthenticatedClient(WebApplicationFactory<Program> factory, Guid customerId)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(customerId, TimeSpan.FromMinutes(10)));
+        return client;
+    }
+
     public string CreateToken(Guid customerId, TimeSpan lifetime)
     {
+        return CreateToken(customerId, lifetime, new TokenVariation());
+    }
+
+    /// <summary>Token com uma variação deliberadamente inválida, para os cenários de autenticação (T11c).</summary>
+    public string CreateToken(Guid customerId, TimeSpan lifetime, TokenVariation variation)
+    {
+        ArgumentNullException.ThrowIfNull(variation);
         var now = DateTime.UtcNow;
         var customer = customerId.ToString("D", CultureInfo.InvariantCulture);
+        var claims = new Dictionary<string, object> { ["sub"] = customer };
+        if (variation.IncludeCustomerId)
+        {
+            claims["customer_id"] = customer;
+        }
+
+        // Para lifetime negativo, a janela inteira fica no passado (Expires deve ser posterior a NotBefore).
+        var start = lifetime < TimeSpan.Zero ? now.Add(lifetime).AddMinutes(-10) : now;
         var descriptor = new SecurityTokenDescriptor
         {
             Issuer = "financialtransactions-dev",
-            Audience = "financialtransactions-api",
-            IssuedAt = now,
-            NotBefore = now,
+            Audience = variation.Audience,
+            IssuedAt = start,
+            NotBefore = start,
             Expires = now.Add(lifetime),
-            Claims = new Dictionary<string, object> { ["sub"] = customer, ["customer_id"] = customer },
-            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)), SecurityAlgorithms.HmacSha256),
+            Claims = claims,
+            SigningCredentials = new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(variation.SigningKey ?? signingKey)),
+                SecurityAlgorithms.HmacSha256),
         };
         return new JsonWebTokenHandler().CreateToken(descriptor);
     }

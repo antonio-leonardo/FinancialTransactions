@@ -18,6 +18,7 @@ builder.Configuration.AddEnvironmentVariables("FT__");
 builder.Services.AddFinancialTransactionsInfrastructure(provider =>
     provider.GetRequiredService<IConfiguration>().GetConnectionString(ConnectionStringName) ?? string.Empty);
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<IRegisterMovementFailurePoints, NoFailurePoints>();
 builder.Services.AddScoped<AccountAccess>();
 builder.Services.AddScoped<RegisterMovementHandler>();
 

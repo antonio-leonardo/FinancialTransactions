@@ -77,6 +77,40 @@ Registradas aqui porque afetam o contrato observável; nenhuma altera H1 a H14.
 - **`description` vazia:** tratada como ausente (nula) antes do fingerprint e da gravação, para que `""` e ausência sejam a mesma intenção.
 - **Protocolo de idempotência (H10):** inserção em transação explícita; violação `23505` **da constraint nomeada** `ux_movements_account_id_idempotency_key` (filtro por `ConstraintName`; outra violação única é falha inesperada, 500) → rollback da transação abortada, limpeza do rastreamento e releitura por (conta, chave) fora dela; fingerprint igual → 200 com o movimento existente; diferente → 422 `idempotency_key_conflict`. Linha ausente após o conflito: estado inesperado, causa não determinada (por exemplo, exclusão concorrente); respondido 409 `retry_later` sem repetir o insert, com log que leva um prefixo do hash da chave, não a chave.
 - **Limite do agregado:** cada movimento cabe em `numeric(18,2)` com teto de 1.000.000.000,00 (H3). `SUM` em PostgreSQL é `numeric` sem limite prático e chega ao .NET como `decimal` (28 dígitos significativos), suficiente para a soma de qualquer volume realista de movimentos no teto. O valor agregado nunca é materializado em coluna; se um dia for, a coluna de posição precisará de precisão maior que `numeric(18,2)`.
-- **Sinal:** a convenção crédito positivo / débito negativo existe em um único ponto do código C# (`MovementRules.SignedAmount`) e é espelhada em SQL (`CASE type WHEN 1 THEN amount ELSE -amount END`) em `PositionQueries`, porque a agregação acontece no banco (H12). Ambas são cobertas por teste.
+- **Sinal:** a convenção crédito positivo / débito negativo existe em um único ponto do código C# (`MovementRules.SignedAmount`) e é espelhada em SQL (`CASE m.type WHEN 1 THEN m.amount ELSE -m.amount END`) em `PositionQueries`, porque a agregação acontece no banco (H12). Desde P02 o fragmento SQL é uma única constante (`SignedAmountSql`) usada pelas duas consultas; conta e corte continuam parâmetros posicionais (`@p0`, `@p1`), provado por teste de tradução. Ambas as formas do sinal são cobertas por teste.
 - **Rota com id inválido:** `{accountId:guid}` que não é GUID não casa com a rota e devolve 404 sem corpo, coerente com não revelar existência.
-- **Precisão dos instantes:** `timestamptz` resolve microssegundos e `DateTimeOffset` resolve 100 ns. `Movement.Create` trunca `effectiveAt` e `registeredAt` a microssegundos antes de persistir, para que a resposta `201` e qualquer releitura (inclusive a repetição idempotente, `200`) carreguem exatamente o mesmo valor. O fingerprint usa o `effectiveAt` como recebido, normalizado para UTC.
+- **Precisão dos instantes:** `timestamptz` resolve microssegundos e `DateTimeOffset` resolve 100 ns. `Movement.Create` trunca `effectiveAt` e `registeredAt` a microssegundos antes de persistir, para que a resposta `201` e qualquer releitura (inclusive a repetição idempotente, `200`) carreguem exatamente o mesmo valor. (Desde P02 o fingerprint usa o mesmo `effectiveAt` normalizado; ver abaixo.)
+
+## Decisões de implementação do ciclo P02
+
+Registradas aqui porque afetam o contrato observável ou a leitura dos testes; nenhuma altera H1 a H14.
+
+- **Fingerprint normalizado (decisão de governança):** o fingerprint passa a aplicar `Movement.NormalizeForPersistence` (UTC, microssegundos) ao `effectiveAt`. Um corpo reconstruído a partir da resposta `201`, que devolve seis casas, replaya com `200` e o mesmo `movementId`, em vez de `422`. Movimentos de laboratório gravados antes desta mudança não são migrados: um replay com 7 dígitos contra um registro antigo seria visto como conteúdo diferente.
+- **Ponto de falha controlado:** `IRegisterMovementFailurePoints` (antes do commit, depois do commit) tem em produção apenas `NoFailurePoints`, registrado como singleton. Nenhuma configuração, cabeçalho ou endpoint ativa outra implementação; os testes substituem o singleton no host de teste.
+- **Filtro da constraint:** `RegisterMovementHandler.IsIdempotencyConflict` é verdadeiro só para `23505` na constraint `ux_movements_account_id_idempotency_key`; outra violação única (por exemplo `pk_movements`) segue como falha inesperada. Há teste de unidade nas duas direções.
+- **Ruído de log no replay concorrente:** o caminho de replay concorrente gera registros `fail:` do EF Core (`Update[10000]`, `Database.Command[20102]`) por desenho, porque a violação `23505` é o mecanismo que protege a identidade. O protocolo não muda. Uma falha real continua visível por `Log.UnhandledException` (evento 1000).
+- **Arquivos gerados:** `.editorconfig` marca `*.Designer.cs` e `*ModelSnapshot.cs` de `Migrations/` com `generated_code = true`.
+- **Evoluções registradas, não feitas:** constraints de defesa em profundidade no banco (teto de valor, domínio de `type`, moeda); `TimeProvider` congelável na fixture de testes.
+
+## Cenários da matriz e aplicabilidade
+
+Estados segundo H14. "Executado e aprovado" refere-se à execução local registrada no checkpoint do ciclo, não a CI.
+
+| ID | Cenário | Estado | Observação |
+|---|---|---|---|
+| T01 | Fluxo básico | executado e aprovado | P01 |
+| T02 | Dois cortes históricos, consolidação por cliente | executado e aprovado | P01 e P01fix (T02a a T02f) |
+| T03 | Fronteiras, origem e entradas | executado e aprovado | P01 e P02: `effectiveAt == openedAt`, descrição 140/141, teto e teto + 0,01, chave 128/129, conta inexistente, conta vazia |
+| T04 | Informação tardia | executado e aprovado | P02: +5 às 09h30 muda 130 para 135 e 110 para 115 (H9) |
+| T05 | Repetição sequencial | executado e aprovado | P01 (T05, T05b) |
+| T06 | Repetição simultânea | executado e aprovado | P02: 20 chamadas, 1 × `201`, 19 × `200`, um registro; T06b com 20 corpos diferentes: 1 × `201`, 19 × `422` |
+| T07 | Chave reutilizada / conteúdo igual legítimo | executado e aprovado | T05b (mesma chave, conteúdo diferente) e T07b (chaves distintas, conteúdo igual: dois movimentos) |
+| T08 | Operações distintas concorrentes | executado e aprovado | P02: 10 + 20 sobre 100 resulta 130; 20 × 1,00 resulta 120 |
+| T09 | Regra sobre agregado | não aplicável | H1: sistema de registro, saldo negativo permitido, nenhum limite sobre o agregado. Sem política de saldo, não há regra que dois débitos concorrentes possam violar; T08 cobre a concorrência que existe. Se H1 mudar, T09 passa a valer e exige controle de concorrência sobre o agregado |
+| T10 | Falha antes e depois do commit | executado e aprovado | P02: antes do commit nada persiste e a repetição cria; depois do commit a repetição devolve o mesmo movimento. Um `500` não é tomado como prova de rollback |
+| T11 | Autenticação e autorização | executado e aprovado | P01 (sem token, outro cliente, inclusive na repetição) e P02 (T11c: expirado, audiência errada, sem `customer_id`, outra chave) |
+| T12 | Precisão e seleção | executado e aprovado | P01 e P02: 100 × 0,01 = 1,00; contas e clientes não vazam; escala de 3 casas rejeitada |
+| T13 | Indisponibilidade e recuperação | previsto para P03 | |
+| T14 | Correção e reconciliação | não aplicável | Sem correção nem estorno no escopo; a posição é derivada e a identidade de cada movimento é preservada pela UNIQUE |
+| T15 | Mensageria | não aplicável | H12: sem broker nem Outbox |
+| T16 | Carga e aceitação | previsto para P03/P04 | |

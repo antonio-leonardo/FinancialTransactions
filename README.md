@@ -88,7 +88,7 @@ Invoke-RestMethod -Uri "http://localhost:5100/api/v1/accounts/$a1/position?asOf=
 Invoke-RestMethod -Uri "http://localhost:5100/api/v1/customers/11111111-1111-1111-1111-111111111111/position?asOf=2026-10-01T00:00:00Z" -Headers $h
 ```
 
-Repetir o mesmo POST com a mesma `Idempotency-Key` e o mesmo corpo devolve `200` com o mesmo `movementId`; a mesma chave com corpo diferente devolve `422 idempotency_key_conflict` sem efeito.
+Repetir o mesmo POST com a mesma `Idempotency-Key` e o mesmo corpo (ou o corpo reconstruído a partir da resposta, cujo `effectiveAt` tem no máximo seis casas fracionárias) devolve `200` com o mesmo `movementId`; a mesma chave com corpo diferente devolve `422 idempotency_key_conflict` sem efeito.
 
 ### Contrato
 
@@ -147,12 +147,16 @@ Implementado e verificado localmente:
 
 - registro persistente de crédito e débito, com `effectiveAt` do cliente e `registeredAt` do servidor;
 - posição por conta e por cliente em `asOf`, calculada no banco, com exclusão de contas abertas depois de `asOf`;
-- idempotência sequencial por `(conta, Idempotency-Key)` com fingerprint do conteúdo;
-- autenticação JWT local e autorização por recurso com base na claim `customer_id`.
+- idempotência por `(conta, Idempotency-Key)` com fingerprint do conteúdo, inclusive sob repetição simultânea: 20 chamadas com a mesma chave e corpo resultam em um `201`, dezenove `200` e um único registro; corpos diferentes sob a mesma chave resultam em um `201` e `422 idempotency_key_conflict` nas demais;
+- operações distintas simultâneas preservadas (chaves diferentes, conteúdo igual ou não), com a posição somando todas;
+- falha antes do commit não deixa registro e a repetição cria; falha depois do commit e antes da resposta deixa o registro e a repetição devolve o mesmo movimento (o ponto de falha só existe no host de testes);
+- informação tardia: um movimento com `effectiveAt` no passado, registrado depois, altera a posição histórica (a posição reflete o conhecimento atual);
+- autenticação JWT local e autorização por recurso com base na claim `customer_id`; tokens expirados, de outra audiência, sem `customer_id` ou assinados com outra chave recebem `401`.
+
+A matriz de cenários e a aplicabilidade de cada um estão em [docs/escopo.md](docs/escopo.md).
 
 Não implementado:
 
-- concorrência adversa (mesma chave em chamadas simultâneas, operações distintas concorrentes);
 - health checks e readiness;
 - ensaio de carga;
 - CI.
