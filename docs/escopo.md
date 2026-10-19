@@ -92,6 +92,19 @@ Registradas aqui porque afetam o contrato observável ou a leitura dos testes; n
 - **Arquivos gerados:** `.editorconfig` marca `*.Designer.cs` e `*ModelSnapshot.cs` de `Migrations/` com `generated_code = true`.
 - **Evoluções registradas, não feitas:** constraints de defesa em profundidade no banco (teto de valor, domínio de `type`, moeda); `TimeProvider` congelável na fixture de testes.
 
+## Decisões de implementação do ciclo P03
+
+Registradas aqui porque afetam o contrato observável e a operação; nenhuma altera H1 a H14.
+
+- **Contrato sob indisponibilidade:** qualquer rota que precise do banco e não obtenha resposta no prazo responde `503` `dependency_unavailable` (ProblemDetails com `traceId`), sem corpo de posição e sem detalhes da exceção. Nunca `200` com saldo zero, nunca `201` sem commit. A repetição é do cliente, com a mesma `Idempotency-Key`; a API não faz retry automático em POST. Uma chave cuja tentativa recebeu `503` antes do commit nunca foi registrada e cria normalmente na repetição.
+- **Classificação (um único lugar, `ApiExceptionHandler.IsDependencyUnavailable`):** `NpgsqlException` com `IsTransient`, `TimeoutException`, `SocketException` e `NpgsqlException` cuja `InnerException` seja uma dessas, na própria exceção ou na `InnerException` (um nível). Violações de constraint e demais falhas continuam `500 internal_error`.
+- **Prazos:** `Timeout=5;Command Timeout=15` na connection string de desenvolvimento (e a recomendar em qualquer ambiente). Os testes de indisponibilidade usam `Timeout=2;Command Timeout=2` por configuração do host de teste.
+- **Sondas:** `GET /health/live` responde `200 {"status":"Healthy"}` sem tocar o banco. `GET /health/ready` executa `SELECT 1` com prazo de 3 s e responde `200 {"status":"Healthy"}` ou `503 {"status":"Unhealthy"}`, sem nome de dependência, mensagem de exceção ou connection string. **Acesso anônimo, por decisão:** orquestradores precisam sondar sem credencial, e a resposta não carrega informação financeira nem de ambiente. As rotas financeiras continuam sob `RequireAuthorization`.
+- **Limite de corpo:** 16 KB para `/api/v1`, em middleware (e não em `KestrelServerOptions.Limits`), para valer só no grupo financeiro e para que o host de testes exerça o mesmo código. Duas camadas: `Content-Length` acima do limite é recusado antes de qualquer leitura (`413 payload_too_large`, ProblemDetails); o limite do servidor (`IHttpMaxRequestBodySizeFeature`) cobre corpo sem `Content-Length`. O `TestServer` não aplica o limite do servidor; por isso a camada do servidor é evidenciada pela sondagem contra Kestrel real (corpo chunked de 64 KB recusado com `413`, sem corpo de resposta). Nada é persistido.
+- **Logs:** logging estruturado do host. Eventos próprios: `MovementRegistered` (Information, com `movementId` e `accountId`), `DependencyUnavailable` (Warning, método, rota e `traceId`), `ReadinessFailed` (Warning, só o tipo da falha) e `UnhandledException` (Error, preservado). Nada registra corpo, `Authorization`, `Idempotency-Key` bruta, connection string ou chave; teste de integração captura os logs de um POST, uma repetição, um `422` e um `401` e procura esses valores.
+- **CI:** `.github/workflows/ci.yml` (ubuntu-latest, serviço `postgres:17` com a credencial sintética do `docker-compose.yml`, restore e build com `-warnaserror`, testes com `FT_TEST_ADMIN_CONNECTION`). Nenhum segredo. **Estado: escrito, não executado.** A primeira execução acontece depois da publicação, em P04; um workflow escrito não é um workflow executado.
+- **Sondagem de reinício:** contra Kestrel real (`Production`) e o container do projeto, em banco descartável: crédito, parada do PostgreSQL (`503` em ~2 s nas rotas de dados, readiness `503` imediato, liveness `200`), religamento, dado anterior preservado (saldo 100,00, 1 movimento), operação nova `201`, replay da chave anterior `200` e a chave usada durante a indisponibilidade criando `201`. O registro está no checkpoint do ciclo.
+
 ## Cenários da matriz e aplicabilidade
 
 Estados segundo H14. "Executado e aprovado" refere-se à execução local registrada no checkpoint do ciclo, não a CI.
@@ -110,7 +123,7 @@ Estados segundo H14. "Executado e aprovado" refere-se à execução local regist
 | T10 | Falha antes e depois do commit | executado e aprovado | P02: antes do commit nada persiste e a repetição cria; depois do commit a repetição devolve o mesmo movimento. Um `500` não é tomado como prova de rollback |
 | T11 | Autenticação e autorização | executado e aprovado | P01 (sem token, outro cliente, inclusive na repetição) e P02 (T11c: expirado, audiência errada, sem `customer_id`, outra chave) |
 | T12 | Precisão e seleção | executado e aprovado | P01 e P02: 100 × 0,01 = 1,00; contas e clientes não vazam; escala de 3 casas rejeitada |
-| T13 | Indisponibilidade e recuperação | previsto para P03 | |
+| T13 | Indisponibilidade e recuperação | executado e aprovado | P03: banco inalcançável → `503 dependency_unavailable` em ~2 s, nunca saldo zero (T13a, T13b); readiness `503`/liveness `200` com o banco fora e readiness `200` com o banco disponível (T13c, T13d); sondas anônimas, API não (`Health_IsAnonymous_ApiIsNot`); limite de corpo; logs sem segredos. Sondagem de reinício do PostgreSQL contra Kestrel real: dado confirmado sobrevive, operações voltam, replay e chave nova se comportam como esperado |
 | T14 | Correção e reconciliação | não aplicável | Sem correção nem estorno no escopo; a posição é derivada e a identidade de cada movimento é preservada pela UNIQUE |
 | T15 | Mensageria | não aplicável | H12: sem broker nem Outbox |
-| T16 | Carga e aceitação | previsto para P03/P04 | |
+| T16 | Carga e aceitação | previsto para P04 | |

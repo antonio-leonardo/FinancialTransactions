@@ -14,6 +14,15 @@ public static class ApiProblems
             extensions: new Dictionary<string, object?> { ["code"] = code });
     }
 
+    public const string DependencyUnavailableCode = "dependency_unavailable";
+    public const string PayloadTooLargeCode = "payload_too_large";
+
+    public static IResult DependencyUnavailable() =>
+        Problem(StatusCodes.Status503ServiceUnavailable, DependencyUnavailableCode, "Dependência indisponível; tente novamente.");
+
+    public static IResult PayloadTooLarge() =>
+        Problem(StatusCodes.Status413PayloadTooLarge, PayloadTooLargeCode, "Corpo da requisição acima do limite de 16 KB.");
+
     public static IResult NotFound() => Problem(StatusCodes.Status404NotFound, NotFoundCode, "Recurso não encontrado.");
 
     public static IResult Unprocessable(string code, string detail) => Problem(StatusCodes.Status422UnprocessableEntity, code, detail);

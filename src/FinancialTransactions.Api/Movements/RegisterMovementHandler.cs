@@ -108,6 +108,7 @@ public sealed class RegisterMovementHandler(
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 await failurePoints.BeforeCommitAsync(cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                Log.MovementRegistered(logger, movement.Id, movement.AccountId);
                 await failurePoints.AfterCommitAsync(cancellationToken).ConfigureAwait(false);
                 return RegisterMovementResult.Created(movement);
             }

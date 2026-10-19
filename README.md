@@ -17,6 +17,8 @@ docker compose up -d --wait
 
 PostgreSQL 17 publicado em `127.0.0.1:15432`, banco `financialtransactions`, usuário `ft`, senha `ft_local_dev_only` (credencial sintética de laboratório, visível em `docker-compose.yml` e em `appsettings.Development.json`). `appsettings.json` não traz connection string; fora do ambiente `Development`, informe `ConnectionStrings__FinancialTransactions` por variável de ambiente ou user-secrets.
 
+A connection string de desenvolvimento termina em `Timeout=5;Command Timeout=15` (segundos para abrir a conexão e para executar um comando). Use os mesmos parâmetros em qualquer ambiente: sem eles, uma dependência indisponível seguraria a requisição por mais tempo do que o contrato de 503 promete (ver "Indisponibilidade" abaixo).
+
 ## 2. Gerar e exportar a chave de assinatura do JWT
 
 A API recusa iniciar sem `Auth:SigningKey` com pelo menos 32 bytes. A chave nunca fica em arquivo versionado.
@@ -92,7 +94,7 @@ Repetir o mesmo POST com a mesma `Idempotency-Key` e o mesmo corpo (ou o corpo r
 
 ### Contrato
 
-Prefixo `/api/v1`; todas as rotas exigem `Authorization: Bearer <jwt>`. Erros são `ProblemDetails` com a extensão `code`.
+Prefixo `/api/v1`; todas as rotas de negócio exigem `Authorization: Bearer <jwt>`. Erros são `ProblemDetails` com a extensão `code`.
 
 | Rota | Entrada | Saída |
 |---|---|---|
@@ -113,7 +115,16 @@ Prefixo `/api/v1`; todas as rotas exigem `Authorization: Bearer <jwt>`. Erros s�
 | `asOf` ausente, ilegível ou mais de 5 minutos no futuro | 422 | `validation_error` |
 | `asOf` antes da abertura da conta, ou nenhuma conta do cliente aberta em `asOf` | 422 | `historico_insuficiente` |
 | Conflito concorrente cuja linha ainda não ficou visível (raro) | 409 | `retry_later` |
+| Corpo com mais de 16 KB | 413 | `payload_too_large` (sem `Content-Length`, o servidor recusa com 413 sem corpo) |
+| Banco indisponível ou sem resposta no prazo | 503 | `dependency_unavailable` |
 | Falha inesperada | 500 | `internal_error` |
+
+### Indisponibilidade, saúde e limites
+
+- **Indisponibilidade:** se o PostgreSQL não responde (conexão recusada, `Timeout`, `Command Timeout`), qualquer rota que precise do banco devolve `503 dependency_unavailable` em ProblemDetails, com `traceId` e sem detalhes da exceção. Nunca `200` com saldo zero e nunca `201` sem commit. A API não repete POST sozinha: repita com a **mesma** `Idempotency-Key`. Se a tentativa que recebeu `503` não chegou ao commit, a repetição cria; se chegou, devolve `200` com o mesmo movimento. Dados confirmados sobrevivem ao reinício do banco (o volume do `docker-compose.yml` é preservado).
+- **Saúde (anônima, fora de `/api/v1`):** `GET /health/live` devolve `200 {"status":"Healthy"}` sempre que o processo responde, sem tocar o banco. `GET /health/ready` executa `SELECT 1` em até 3 s e devolve `200 {"status":"Healthy"}` ou `503 {"status":"Unhealthy"}`. Nenhuma das respostas traz nome de dependência, mensagem de exceção ou connection string. As rotas financeiras seguem exigindo token.
+- **Limite de requisição:** corpos acima de 16 KB em `/api/v1` são recusados com `413` e nada é persistido. `Idempotency-Key` tem no máximo 128 caracteres.
+- **Logs:** nunca registram corpo, `Authorization`, `Idempotency-Key` bruta, connection string ou chave. O registro de um movimento gera o evento `MovementRegistered` com o `movementId`; indisponibilidade gera `DependencyUnavailable` (Warning) com rota e `traceId`.
 
 Instantes (gramática fechada, cultura invariante):
 
@@ -132,6 +143,10 @@ dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vst
 ```
 
 Os testes de integração sobem a API real (`WebApplicationFactory`) contra um banco PostgreSQL descartável por execução (`ft_test_<hex>`), criado e migrado no início e removido ao final. Eles usam por padrão a conexão administrativa `Host=127.0.0.1;Port=15432;Database=postgres;Username=ft;Password=ft_local_dev_only`; para outro servidor, defina `FT_TEST_ADMIN_CONNECTION`. A chave JWT dos testes é gerada a cada execução. Para rodar só os testes de unidade (sem banco): `dotnet test tests/FinancialTransactions.UnitTests -c Release --no-build --settings tests/vstest.runsettings`.
+
+## CI
+
+O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) está **escrito, não executado**: a primeira execução acontecerá depois da publicação do repositório. Ele roda em `ubuntu-latest` com um serviço `postgres:17` (a mesma credencial sintética do `docker-compose.yml`, sem nenhum segredo), SDK .NET 10.0.x, `dotnet msbuild -target:Restore -warnaserror`, `dotnet build -c Release --no-restore --no-incremental -warnaserror` e `dotnet test -c Release --no-build --settings tests/vstest.runsettings`, com `FT_TEST_ADMIN_CONNECTION` apontando para o serviço.
 
 ## Estrutura
 
@@ -155,8 +170,9 @@ Implementado e verificado localmente:
 
 A matriz de cenários e a aplicabilidade de cada um estão em [docs/escopo.md](docs/escopo.md).
 
+- indisponibilidade do banco respondida com `503` dentro do prazo, readiness e liveness, limite de corpo de 16 KB e logs sem segredos; recuperação verificada com reinício do PostgreSQL contra a API real (dado anterior preservado, operações voltam).
+
 Não implementado:
 
-- health checks e readiness;
 - ensaio de carga;
-- CI.
+- execução da CI (o workflow existe, mas ainda não rodou).

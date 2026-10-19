@@ -1,12 +1,13 @@
 using FinancialTransactions.Api.Auth;
 using FinancialTransactions.Api.Endpoints;
+using FinancialTransactions.Api.Health;
 using FinancialTransactions.Api.Http;
 using FinancialTransactions.Api.Movements;
 using FinancialTransactions.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 
-const string ConnectionStringName = "FinancialTransactions";
+const string ConnectionStringName = DatabaseReadinessCheck.ConnectionStringName;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -61,6 +62,9 @@ builder.Services
     });
 builder.Services.AddAuthorization();
 
+builder.Services.AddHealthChecks()
+    .AddCheck<DatabaseReadinessCheck>("db", tags: [HealthEndpoints.ReadyTag]);
+
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<ApiExceptionHandler>();
 // Falhas de binding (JSON ilegível, tipo errado) viram exceção e saem como 422 validation_error no ApiExceptionHandler.
@@ -81,8 +85,12 @@ if (string.IsNullOrWhiteSpace(app.Configuration.GetConnectionString(ConnectionSt
 }
 
 app.UseExceptionHandler();
+app.UseApiRequestBodyLimit();
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Sondas anônimas, fora do grupo autenticado abaixo.
+app.MapHealthEndpoints();
 
 var api = app.MapGroup("/api/v1").RequireAuthorization();
 api.MapMovementEndpoints();

@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
@@ -50,6 +51,13 @@ public sealed class ApiFactory(string connectionString, string signingKey) : Web
             services.RemoveAll<IRegisterMovementFailurePoints>();
             services.AddSingleton(failurePoints);
         }));
+    }
+
+    /// <summary>Factory derivada que também entrega todos os logs ao provider informado. O chamador descarta a factory devolvida.</summary>
+    public WebApplicationFactory<Program> WithLoggerProvider(ILoggerProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return WithWebHostBuilder(builder => builder.ConfigureLogging(logging => logging.AddProvider(provider)));
     }
 
     /// <summary>Cliente autenticado como o cliente informado, a partir de qualquer factory derivada.</summary>

@@ -1,8 +1,14 @@
+using System.Net.Sockets;
 using Microsoft.AspNetCore.Diagnostics;
+using Npgsql;
 
 namespace FinancialTransactions.Api.Http;
 
-/// <summary>Falha de leitura da requisição vira 422 validation_error; qualquer outra vira 500 internal_error, registrada no log e sem detalhes na resposta.</summary>
+/// <summary>
+/// Ponto único de tradução de exceção em resposta HTTP. Corpo ilegível vira 422 validation_error; corpo acima do limite
+/// vira 413; dependência (banco) indisponível vira 503 dependency_unavailable; qualquer outra falha vira 500
+/// internal_error, registrada no log. Nenhuma resposta leva detalhes da exceção.
+/// </summary>
 public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
@@ -10,18 +16,52 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
         ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(exception);
 
+        var method = httpContext.Request.Method;
+        var path = httpContext.Request.Path.Value ?? string.Empty;
+
         IResult result;
-        if (exception is BadHttpRequestException)
+        if (exception is BadHttpRequestException { StatusCode: StatusCodes.Status413PayloadTooLarge })
+        {
+            result = ApiProblems.PayloadTooLarge();
+        }
+        else if (exception is BadHttpRequestException)
         {
             result = ApiProblems.Unprocessable("validation_error", "Requisição inválida: corpo, cabeçalho ou parâmetro não pôde ser lido.");
         }
+        else if (IsDependencyUnavailable(exception))
+        {
+            Log.DependencyUnavailable(logger, method, path, httpContext.TraceIdentifier);
+            result = ApiProblems.DependencyUnavailable();
+        }
         else
         {
-            Log.UnhandledException(logger, exception, httpContext.Request.Method, httpContext.Request.Path.Value ?? string.Empty);
+            Log.UnhandledException(logger, exception, method, path);
             result = ApiProblems.Problem(StatusCodes.Status500InternalServerError, ApiProblems.InternalErrorCode, "Falha inesperada. Consulte o log do servidor.");
         }
 
         await result.ExecuteAsync(httpContext).ConfigureAwait(false);
         return true;
+    }
+
+    /// <summary>
+    /// Verdadeiro quando a exceção (ou a sua <c>InnerException</c>, um nível) indica que o banco não respondeu:
+    /// <c>NpgsqlException</c> transitória, <c>TimeoutException</c> ou <c>SocketException</c>. Violações de constraint
+    /// (<c>PostgresException</c> 23505) e demais falhas não são indisponibilidade.
+    /// </summary>
+    public static bool IsDependencyUnavailable(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return IsUnavailable(exception) || (exception.InnerException is { } inner && IsUnavailable(inner));
+    }
+
+    private static bool IsUnavailable(Exception exception)
+    {
+        return exception switch
+        {
+            TimeoutException or SocketException => true,
+            NpgsqlException { IsTransient: true } => true,
+            NpgsqlException { InnerException: TimeoutException or SocketException } => true,
+            _ => false,
+        };
     }
 }
