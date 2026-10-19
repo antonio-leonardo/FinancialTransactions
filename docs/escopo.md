@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-Um sistema interno de um banco digital precisa registrar movimentações financeiras (créditos e débitos) nas contas de clientes e informar, sob demanda, a posição consolidada (saldo) de um cliente em um determinado instante. O sistema deve se comportar de forma confiável diante de instabilidade, alta demanda e falhas parciais, e deve proteger dados sensíveis.
+Este serviço interno guarda o histórico de lançamentos a crédito e a débito de cada conta e responde qual era o saldo de um cliente, somando as contas dele, no momento que a consulta indicar. Precisa continuar correto quando a infraestrutura oscila, quando o volume cresce ou quando uma operação falha pela metade, e não pode expor informação sensível de quem o utiliza.
 
 ## Requisitos obrigatórios da entrega
 
@@ -123,6 +123,15 @@ Registradas aqui porque tratam da documentação pública; nenhuma altera H1 a H
 - **Divergências README ↔ código, corrigidas no texto:** (a) o replay com "o corpo reconstruído a partir da resposta" só devolve `200` quando a requisição original não tinha `description`, porque a resposta não traz `description` e ela entra no fingerprint (o mesmo vale para a frase do ciclo P02 acima); (b) a credencial sintética do banco aparece também no README, em `docs/carga.md`, na conexão administrativa dos testes e no workflow, não só no compose e na configuração de desenvolvimento; (c) a CI deixou de ser descrita como "não executada"; (d) o exemplo de posição passou a ter a chamada às 11:30 em vez de um comentário. Nenhum defeito de código foi encontrado.
 - **`docs/carga.md`:** dois ajustes editoriais (latência com timeouts e falhas de transporte; limite sobre a reconciliação), sem alteração de números.
 - **Pendências de manutenção do workflow** (sonda do serviço PostgreSQL e versões das actions): ver [verificacao.md](verificacao.md).
+
+## Decisões do ciclo P06
+
+Registradas aqui porque tratam da manutenção do workflow e da forma de aceitação; nenhuma altera H1 a H14, o contrato ou o código do produto.
+
+- **Sonda do serviço PostgreSQL na CI (`GOV-P04-CI-01`):** o `--health-cmd` passou de `pg_isready -U ft` para `pg_isready -U ft -d postgres`, para que a sonda consulte a base `postgres` (a única criada pelo serviço, `POSTGRES_DB=postgres`) e não a base `ft`, inexistente. Objetivo restrito a essa causa de mensagem no log do serviço; não pretende eliminar toda ocorrência de `FATAL` (testes de indisponibilidade podem gerar outras, esperadas). **Estado: aplicada no arquivo; ainda sem execução na CI.** O efeito sobre o log não é verificável pela API pública.
+- **Versões das actions (`GOV-P04-CI-02`), uma decisão por action:** `actions/checkout` de `v4` para `v7` e `actions/setup-dotnet` de `v4` para `v6`. Critério: major maior que o atual, `runs.using` em `node24`, entradas usadas pelo workflow inalteradas e notas sem exigência além da troca da referência. `checkout@v7` só muda o comportamento de `pull_request_target` e `workflow_run`, que o workflow não usa, e o workflow não passa entradas à action. `setup-dotnet@v6` migrou para ESM sem mudança de entradas, saídas ou comportamento; `dotnet-version` segue válida. Ambas exigem runner 2.327.1 ou posterior (`node24`). **Estado de cada uma: aplicada no arquivo; ainda sem execução na CI.** A execução real fica para a etapa seguinte, após o envio.
+- **Aceitação por checkout novo:** a versão candidata será aceita a partir de um clone novo da URL pública, em contexto sem credencial, com o roteiro de aceitação do guia, controles negativos e o passo a passo do README. O resultado entra em [verificacao.md](verificacao.md).
+- **Redação de "Objetivo":** o parágrafo foi reescrito com palavras próprias, preservando a substância (o que o sistema registra, o que consulta e em que instante).
 
 ## Cenários da matriz e aplicabilidade
 
