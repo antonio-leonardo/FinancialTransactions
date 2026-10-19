@@ -6,6 +6,9 @@ namespace FinancialTransactions.Infrastructure.Configurations;
 
 public sealed class MovementConfiguration : IEntityTypeConfiguration<Movement>
 {
+    /// <summary>Nome da restrição UNIQUE (account_id, idempotency_key); o tratamento do conflito 23505 filtra por ele.</summary>
+    public const string IdempotencyUniqueConstraintName = "ux_movements_account_id_idempotency_key";
+
     public void Configure(EntityTypeBuilder<Movement> builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -33,7 +36,7 @@ public sealed class MovementConfiguration : IEntityTypeConfiguration<Movement>
         // Identidade da intenção (H10): a mesma chave na mesma conta só entra uma vez.
         builder.HasIndex(m => new { m.AccountId, m.IdempotencyKey })
             .IsUnique()
-            .HasDatabaseName("ux_movements_account_id_idempotency_key");
+            .HasDatabaseName(IdempotencyUniqueConstraintName);
 
         // Caminho da posição: filtra por conta e corte temporal.
         builder.HasIndex(m => new { m.AccountId, m.EffectiveAt })

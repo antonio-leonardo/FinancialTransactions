@@ -1,7 +1,10 @@
 using FinancialTransactions.Api.Auth;
 using FinancialTransactions.Api.Http;
 using FinancialTransactions.Domain;
+using System.Security.Cryptography;
+using System.Text;
 using FinancialTransactions.Infrastructure;
+using FinancialTransactions.Infrastructure.Configurations;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -63,9 +66,10 @@ public sealed class RegisterMovementHandler(
             return RegisterMovementResult.Rejected(MovementRules.ValidationError, amountError);
         }
 
-        if (request.EffectiveAt is not { } effectiveAt)
+        // Validação lexical antes da conversão: texto sem offset não vira instante no fuso da máquina.
+        if (!InstantParser.TryParseWithOffset(request.EffectiveAt, out var effectiveAt))
         {
-            return RegisterMovementResult.Rejected(MovementRules.ValidationError, "effectiveAt obrigatório, em ISO 8601 com offset.");
+            return RegisterMovementResult.Rejected(MovementRules.ValidationError, "effectiveAt deve ser ISO 8601 com offset explícito (ex.: 2026-09-01T09:00:00-03:00 ou 2026-09-01T12:00:00Z).");
         }
 
         var description = string.IsNullOrEmpty(request.Description) ? null : request.Description;
@@ -104,10 +108,15 @@ public sealed class RegisterMovementHandler(
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return RegisterMovementResult.Created(movement);
             }
-            catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException
             {
-                // 23505 em ux_movements_account_id_idempotency_key: a transação PostgreSQL está abortada e
-                // não aceita novas consultas. Reverter aqui; a releitura acontece fora dela, abaixo.
+                SqlState: PostgresErrorCodes.UniqueViolation,
+                ConstraintName: MovementConfiguration.IdempotencyUniqueConstraintName,
+            })
+            {
+                // 23505 exatamente na UNIQUE (account_id, idempotency_key): a transação PostgreSQL está abortada e
+                // não aceita novas consultas. Reverter aqui; a releitura acontece fora dela, abaixo. Qualquer outra
+                // violação única não é tratada como repetição e segue para o ApiExceptionHandler (500).
                 await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
             }
         }
@@ -121,14 +130,19 @@ public sealed class RegisterMovementHandler(
 
         if (existing is null)
         {
-            // Janela rara: a outra transação que detinha a chave foi revertida depois do nosso conflito.
-            // Sem repetir o insert em loop; o cliente repete a mesma requisição.
-            Log.IdempotencyRereadMiss(logger, account.Id, key);
+            // Linha ausente após o conflito: estado inesperado, causa não determinada (por exemplo, exclusão
+            // concorrente); respondido 409 sem repetir o insert. O log leva um prefixo do hash da chave, não a chave.
+            Log.IdempotencyRereadMiss(logger, account.Id, KeyHashPrefix(key));
             return RegisterMovementResult.RetryLater();
         }
 
         return string.Equals(existing.RequestFingerprint, fingerprint, StringComparison.Ordinal)
             ? RegisterMovementResult.Replayed(existing)
             : RegisterMovementResult.Rejected(IdempotencyKeyConflict, "Idempotency-Key já usada nesta conta com conteúdo diferente.");
+    }
+
+    private static string KeyHashPrefix(string key)
+    {
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..12];
     }
 }

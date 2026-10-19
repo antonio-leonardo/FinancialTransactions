@@ -9,7 +9,7 @@ namespace FinancialTransactions.Api.Endpoints;
 
 public static class PositionEndpoints
 {
-    private const string AsOfInvalidDetail = "asOf obrigatório, em ISO 8601 com offset (ex.: 2026-09-01T10:30:00-03:00 ou 2026-09-01T13:30:00Z).";
+    private const string AsOfInvalidDetail = "asOf obrigatório: data e hora completas em ISO 8601, com offset (ex.: 2026-09-01T10:30:00-03:00, 2026-09-01T13:30:00Z) ou sem offset, lido como UTC (2026-09-01T13:30:00). Só data, só hora ou formato regional são inválidos.";
     private const string AsOfTooFarDetail = "asOf além da tolerância de 5 minutos no futuro.";
 
     public static RouteGroupBuilder MapPositionEndpoints(this RouteGroupBuilder group)

@@ -1,4 +1,4 @@
-using System.Globalization;
+using FinancialTransactions.Domain;
 
 namespace FinancialTransactions.Api.Positions;
 
@@ -16,15 +16,16 @@ public sealed record CustomerPositionResponse(
     IReadOnlyList<CustomerAccountPositionResponse> Accounts,
     IReadOnlyList<ExcludedAccountResponse> ExcludedAccounts);
 
-/// <summary>Leitura de <c>asOf</c> da query string. Sem offset explícito, assume UTC. Ausente ou ilegível é inválido.</summary>
+/// <summary>
+/// Leitura de <c>asOf</c> da query string: data e hora completas, com offset (Z ou ±HH:mm) ou sem offset (UTC).
+/// Só data, só hora, formato regional ou texto são inválidos. Delegada ao parser estrito do domínio.
+/// </summary>
 public static class AsOfParser
 {
     public const string HistoricoInsuficiente = "historico_insuficiente";
 
     public static bool TryParse(string? raw, out DateTimeOffset asOf)
     {
-        asOf = default;
-        return !string.IsNullOrWhiteSpace(raw)
-            && DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out asOf);
+        return InstantParser.TryParseUtcOrOffset(raw, out asOf);
     }
 }

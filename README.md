@@ -22,15 +22,17 @@ PostgreSQL 17 publicado em `127.0.0.1:15432`, banco `financialtransactions`, usu
 A API recusa iniciar sem `Auth:SigningKey` com pelo menos 32 bytes. A chave nunca fica em arquivo versionado.
 
 ```powershell
-$key = [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Maximum 256 }) -as [byte[]])
+$key = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
 $env:FT__Auth__SigningKey = $key
 ```
 
-Alternativa persistente para a máquina de desenvolvimento, fora do repositório:
+Alternativa persistente para a máquina de desenvolvimento, fora do repositório (o projeto declara `UserSecretsId`, um identificador do cofre local, não um segredo):
 
 ```powershell
 dotnet user-secrets set "Auth:SigningKey" "$key" --project src/FinancialTransactions.Api
 ```
+
+User-secrets só são lidos no ambiente `Development` (perfil `http` do `dotnet run`). Fora dele, e para a ferramenta de token, use a variável de ambiente.
 
 ## 3. Criar o esquema e a massa sintética
 
@@ -57,7 +59,7 @@ Migrations não são aplicadas no startup da API.
 dotnet run --project src/FinancialTransactions.Api
 ```
 
-Perfil `http` em `http://localhost:5100` (ambiente `Development`). A variável `FT__Auth__SigningKey` precisa estar definida na mesma sessão.
+Perfil `http` em `http://localhost:5100` (ambiente `Development`). A variável `FT__Auth__SigningKey` precisa estar definida na sessão que executa a API. O `dotnet run` ocupa o terminal: gere o token e faça as chamadas das seções 5 e 6 em **outro terminal**, com a mesma `FT__Auth__SigningKey` exportada nele.
 
 ## 5. Gerar um token local
 
@@ -103,7 +105,7 @@ Prefixo `/api/v1`; todas as rotas exigem `Authorization: Bearer <jwt>`. Erros s�
 |---|---|---|
 | Sem token ou token inválido | 401 | padrão |
 | Conta ou cliente fora do escopo do token, ou inexistente | 404 | `not_found` |
-| Corpo, cabeçalho ou parâmetro inválido | 422 | `validation_error` |
+| Corpo, cabeçalho ou parâmetro inválido (inclusive `effectiveAt` sem offset e `asOf` fora da gramática abaixo) | 422 | `validation_error` |
 | `effectiveAt` mais de 5 minutos no futuro | 422 | `effective_at_in_future` |
 | `effectiveAt` anterior à abertura da conta | 422 | `effective_at_before_opening` |
 | `Idempotency-Key` ausente ou inválida | 422 | `idempotency_key_required` |
@@ -113,7 +115,14 @@ Prefixo `/api/v1`; todas as rotas exigem `Authorization: Bearer <jwt>`. Erros s�
 | Conflito concorrente cuja linha ainda não ficou visível (raro) | 409 | `retry_later` |
 | Falha inesperada | 500 | `internal_error` |
 
-Instantes: envie `effectiveAt` e `asOf` em ISO 8601 com offset ou `Z`. As respostas devolvem todos os instantes em UTC (o offset recebido não é preservado). Em query string, prefira `Z` ou `-03:00`; um `+` precisa ser codificado como `%2B`. `asOf` sem offset é interpretado como UTC. A posição inclui movimentos com `effectiveAt <= asOf`.
+Instantes (gramática fechada, cultura invariante):
+
+| Campo | Aceito | Rejeitado (422 `validation_error`) |
+|---|---|---|
+| `effectiveAt` (POST) | `yyyy-MM-ddTHH:mm:ss` seguido de `Z` ou `±HH:mm`, com até 7 dígitos fracionários opcionais (ex.: `2026-09-01T09:00:00-03:00`, `2026-09-01T12:00:00.123Z`) | sem offset; só data; só hora; formato regional; texto; número JSON |
+| `asOf` (GET) | o mesmo que acima, **mais** `yyyy-MM-ddTHH:mm:ss[.fff]` sem offset, interpretado como UTC | só data; só hora; formato regional; texto |
+
+As respostas devolvem todos os instantes em UTC (o offset recebido não é preservado). Em query string, um `+` precisa ser codificado como `%2B`; prefira `Z` ou offset negativo. A posição inclui movimentos com `effectiveAt <= asOf`.
 
 ## 7. Compilar e testar
 

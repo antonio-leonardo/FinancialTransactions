@@ -4,10 +4,10 @@ namespace FinancialTransactions.IntegrationTests;
 
 public sealed class CustomerPositionAndIdempotencyTests(PostgresFixture fixture) : IntegrationTest(fixture)
 {
-    private async Task SeedTwoAccountsAsync(HttpClient client)
+    private async Task SeedTwoAccountsAsync(HttpClient client, string a1EffectiveAt, string a2EffectiveAt)
     {
-        using var a1 = await PostMovementAsync(client, AccountA1, NewKey(), Credit("50.00", "2026-03-15T12:00:00Z"));
-        using var a2 = await PostMovementAsync(client, AccountA2, NewKey(), Credit("25.00", "2026-03-15T12:00:00Z"));
+        using var a1 = await PostMovementAsync(client, AccountA1, NewKey(), Credit("50.00", a1EffectiveAt));
+        using var a2 = await PostMovementAsync(client, AccountA2, NewKey(), Credit("25.00", a2EffectiveAt));
         Assert.Equal(HttpStatusCode.Created, a1.StatusCode);
         Assert.Equal(HttpStatusCode.Created, a2.StatusCode);
     }
@@ -16,7 +16,7 @@ public sealed class CustomerPositionAndIdempotencyTests(PostgresFixture fixture)
     public async Task T02dCustomerPositionSumsOpenAccounts()
     {
         using var client = ClientFor(CustomerA);
-        await SeedTwoAccountsAsync(client);
+        await SeedTwoAccountsAsync(client, "2026-03-15T12:00:00Z", "2026-03-15T12:00:00Z");
 
         using var response = await client.GetAsync(CustomerPositionUri(CustomerA, "2026-04-01T00:00:00Z"));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -40,12 +40,43 @@ public sealed class CustomerPositionAndIdempotencyTests(PostgresFixture fixture)
     public async Task T02eCustomerPositionExcludesAccountsOpenedAfterAsOf()
     {
         using var client = ClientFor(CustomerA);
-        await SeedTwoAccountsAsync(client);
+        // A1 já tem saldo em 15/02; A2 só abre em 01/03 e recebe crédito em 15/03.
+        await SeedTwoAccountsAsync(client, "2026-02-01T12:00:00Z", "2026-03-15T12:00:00Z");
 
         using var response = await client.GetAsync(CustomerPositionUri(CustomerA, "2026-02-15T00:00:00Z"));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await ReadAsync<CustomerPositionDto>(response);
-        // Em 15/02 só A1 existe e o crédito de 15/03 ainda não aconteceu: saldo 0 de uma conta aberta, não história insuficiente.
+        Assert.Equal(50.00m, body.Balance);
+        var only = Assert.Single(body.Accounts);
+        Assert.Equal(AccountA1, only.AccountId);
+        Assert.Equal(50.00m, only.Balance);
+        Assert.Equal(1, only.MovementCount);
+        var excluded = Assert.Single(body.ExcludedAccounts);
+        Assert.Equal(AccountA2, excluded.AccountId);
+        Assert.Equal(new DateTimeOffset(2026, 3, 1, 0, 0, 0, TimeSpan.Zero), excluded.OpenedAt);
+
+        using var afterBoth = await client.GetAsync(CustomerPositionUri(CustomerA, "2026-03-20T00:00:00Z"));
+        Assert.Equal(HttpStatusCode.OK, afterBoth.StatusCode);
+        var later = await ReadAsync<CustomerPositionDto>(afterBoth);
+        Assert.Equal(75.00m, later.Balance);
+        Assert.Equal(2, later.Accounts.Count);
+        Assert.Empty(later.ExcludedAccounts);
+
+        using var tooEarly = await client.GetAsync(CustomerPositionUri(CustomerA, "2025-12-15T00:00:00Z"));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, tooEarly.StatusCode);
+        Assert.Equal("historico_insuficiente", await ReadCodeAsync(tooEarly));
+    }
+
+    [Fact(DisplayName = "T02f_CustomerPosition_OpenAccountWithoutMovementsIsZero")]
+    public async Task T02fCustomerPositionOpenAccountWithoutMovementsIsZero()
+    {
+        using var client = ClientFor(CustomerA);
+        await SeedTwoAccountsAsync(client, "2026-03-15T12:00:00Z", "2026-03-15T12:00:00Z");
+
+        using var response = await client.GetAsync(CustomerPositionUri(CustomerA, "2026-02-15T00:00:00Z"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await ReadAsync<CustomerPositionDto>(response);
+        // Em 15/02 só A1 existe e ainda não tem movimento: saldo zero de conta aberta, não história insuficiente.
         Assert.Equal(0.00m, body.Balance);
         var only = Assert.Single(body.Accounts);
         Assert.Equal(AccountA1, only.AccountId);
@@ -53,15 +84,8 @@ public sealed class CustomerPositionAndIdempotencyTests(PostgresFixture fixture)
         var excluded = Assert.Single(body.ExcludedAccounts);
         Assert.Equal(AccountA2, excluded.AccountId);
         Assert.Equal(new DateTimeOffset(2026, 3, 1, 0, 0, 0, TimeSpan.Zero), excluded.OpenedAt);
-
-        using var afterCredit = await client.GetAsync(CustomerPositionUri(CustomerA, "2026-03-20T00:00:00Z"));
-        Assert.Equal(HttpStatusCode.OK, afterCredit.StatusCode);
-        Assert.Equal(75.00m, (await ReadAsync<CustomerPositionDto>(afterCredit)).Balance);
-
-        using var tooEarly = await client.GetAsync(CustomerPositionUri(CustomerA, "2025-12-15T00:00:00Z"));
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, tooEarly.StatusCode);
-        Assert.Equal("historico_insuficiente", await ReadCodeAsync(tooEarly));
     }
+
 
     [Fact(DisplayName = "T05_SameKeySameBody_ReplaysSameMovement")]
     public async Task T05SameKeySameBodyReplaysSameMovement()

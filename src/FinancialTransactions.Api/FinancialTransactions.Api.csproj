@@ -1,5 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
+  <PropertyGroup>
+    <!-- Identificador do cofre local de user-secrets (não é segredo); lido só em Development. -->
+    <UserSecretsId>financialtransactions-api-dev</UserSecretsId>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\FinancialTransactions.Infrastructure\FinancialTransactions.Infrastructure.csproj" />
   </ItemGroup>

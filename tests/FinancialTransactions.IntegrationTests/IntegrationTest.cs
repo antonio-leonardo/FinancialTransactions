@@ -47,6 +47,21 @@ public abstract class IntegrationTest(PostgresFixture fixture) : IAsyncLifetime
         return await client.SendAsync(request);
     }
 
+    /// <summary>Envia o corpo exatamente como texto JSON, sem serialização intermediária de tipos .NET.</summary>
+    protected async Task<HttpResponseMessage> PostRawAsync(HttpClient client, Guid accountId, string? idempotencyKey, string json)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        _usedAccounts.Add(accountId);
+        using var request = new HttpRequestMessage(HttpMethod.Post, Relative($"/api/v1/accounts/{accountId}/movements"));
+        if (idempotencyKey is not null)
+        {
+            request.Headers.Add("Idempotency-Key", idempotencyKey);
+        }
+
+        request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        return await client.SendAsync(request);
+    }
+
     protected static object Credit(string amount, string effectiveAt, string? description = null) =>
         new { type = "Credit", amount = decimal.Parse(amount, CultureInfo.InvariantCulture), effectiveAt, description };
 

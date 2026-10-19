@@ -3,8 +3,11 @@ using FinancialTransactions.Domain;
 
 namespace FinancialTransactions.Api.Movements;
 
-/// <summary>Corpo de POST /accounts/{accountId}/movements. Tudo opcional no transporte; a validação devolve 422 com código.</summary>
-public sealed record RegisterMovementRequest(string? Type, decimal? Amount, DateTimeOffset? EffectiveAt, string? Description);
+/// <summary>
+/// Corpo de POST /accounts/{accountId}/movements. Tudo opcional no transporte; a validação devolve 422 com código.
+/// effectiveAt chega como texto e só vira instante no InstantParser, para que a ausência de offset seja detectável.
+/// </summary>
+public sealed record RegisterMovementRequest(string? Type, decimal? Amount, string? EffectiveAt, string? Description);
 
 /// <summary>Representação pública de um movimento. Sem chave de idempotência nem fingerprint. Instantes em UTC.</summary>
 public sealed record MovementResponse(
