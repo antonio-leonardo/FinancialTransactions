@@ -144,6 +144,23 @@ dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vst
 
 Os testes de integração sobem a API real (`WebApplicationFactory`) contra um banco PostgreSQL descartável por execução (`ft_test_<hex>`), criado e migrado no início e removido ao final. Eles usam por padrão a conexão administrativa `Host=127.0.0.1;Port=15432;Database=postgres;Username=ft;Password=ft_local_dev_only`; para outro servidor, defina `FT_TEST_ADMIN_CONNECTION`. A chave JWT dos testes é gerada a cada execução. Para rodar só os testes de unidade (sem banco): `dotnet test tests/FinancialTransactions.UnitTests -c Release --no-build --settings tests/vstest.runsettings`.
 
+## Ensaio de carga
+
+Ferramenta de console em `tools/FinancialTransactions.LoadTest` e pré-carga em `tools/FinancialTransactions.LoadTest/seed_load.sql`. O ensaio roda contra a API real e um banco descartável `ft_load_<n>` (nunca o de desenvolvimento), com 200 clientes, 400 contas e 100.000 movimentos pré-carregados, 32 trabalhadores, 10 s de aquecimento e 60 s medidos, e termina com uma reconciliação do banco contra o que a ferramenta registrou como aceito. Resultados, ambiente, planos de consulta e limites: [docs/carga.md](docs/carga.md).
+
+Resumo do passo a passo (comandos completos em [docs/carga.md](docs/carga.md#como-reproduzir)):
+
+```powershell
+$conn = 'Host=127.0.0.1;Port=15432;Database=ft_load_1;Username=ft;Password=ft_local_dev_only;Timeout=5;Command Timeout=15'
+dotnet ef database update --connection $conn --project src/FinancialTransactions.Infrastructure --startup-project src/FinancialTransactions.Api --configuration Release --no-build
+Get-Content tools/FinancialTransactions.LoadTest/seed_load.sql -Raw | docker exec -i financialtransactions-postgres psql -U ft -d ft_load_1 -v ON_ERROR_STOP=1
+# Subir a API em Production com FT__Auth__SigningKey e FT__ConnectionStrings__FinancialTransactions, e então:
+$env:FT_LOAD_ADMIN_CONNECTION = $conn
+dotnet tools/FinancialTransactions.LoadTest/bin/Release/net10.0/FinancialTransactions.LoadTest.dll --base-url http://127.0.0.1:<porta> --out ./saida-carga
+```
+
+A ferramenta usa a mesma `FT__Auth__SigningKey` da API para emitir os tokens, só aceita `--base-url` em `127.0.0.1`/`localhost` e só aceita bancos `ft_load_*`. É um ensaio de desenvolvimento: os números de `docs/carga.md` não valem para produção.
+
 ## CI
 
 O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) está **escrito, não executado**: a primeira execução acontecerá depois da publicação do repositório. Ele roda em `ubuntu-latest` com um serviço `postgres:17` (a mesma credencial sintética do `docker-compose.yml`, sem nenhum segredo), SDK .NET 10.0.x, `dotnet msbuild -target:Restore -warnaserror`, `dotnet build -c Release --no-restore --no-incremental -warnaserror` e `dotnet test -c Release --no-build --settings tests/vstest.runsettings`, com `FT_TEST_ADMIN_CONNECTION` apontando para o serviço.
@@ -154,6 +171,7 @@ O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) está **escrito,
 - `src/FinancialTransactions.Infrastructure`: `DbContext`, configurações snake_case, migration com seed, `PositionQueries` (agregação por `SUM`/`COUNT` no banco).
 - `src/FinancialTransactions.Api`: endpoints, JWT, autorização por recurso, `ProblemDetails`, caso de uso `RegisterMovement`.
 - `tools/FinancialTransactions.DevToken`: emissor local de tokens.
+- `tools/FinancialTransactions.LoadTest`: ferramenta do ensaio de carga e `seed_load.sql`.
 - `tests/`: unidade (xUnit) e integração (xUnit + PostgreSQL real).
 
 ## Estado atual
@@ -172,7 +190,9 @@ A matriz de cenários e a aplicabilidade de cada um estão em [docs/escopo.md](d
 
 - indisponibilidade do banco respondida com `503` dentro do prazo, readiness e liveness, limite de corpo de 16 KB e logs sem segredos; recuperação verificada com reinício do PostgreSQL contra a API real (dado anterior preservado, operações voltam).
 
+- ensaio de carga local (duas execuções, 60 s medidos cada, zero erro técnico) com reconciliação exata do banco e análise dos planos das consultas de posição, em [docs/carga.md](docs/carga.md); não representa produção.
+
 Não implementado:
 
-- ensaio de carga;
+- cache e posição materializada (decisão registrada com condição de revisão em [docs/carga.md](docs/carga.md));
 - execução da CI (o workflow existe, mas ainda não rodou).
