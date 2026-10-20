@@ -194,6 +194,8 @@ public sealed class ConsolidationBootstrapTests(ITestOutputHelper output)
         var worker = await rig.StartWorkerAsync(new WorkerStart { Diagnostics = CapturePromotion(rig, p => atPromotion = p) });
         await ConsolidationRig.Eventually(async () => await rig.ProcessedCountAsync() == 13 && await rig.PhaseAsync() == "live", "13 eventos aplicados em live");
 
+        // O callback roda na thread do consumidor logo depois do commit da promoção; a fase live já é visível no banco um instante antes.
+        await ConsolidationRig.Eventually(() => Task.FromResult(atPromotion is not null), "callback da promoção");
         Assert.NotNull(atPromotion);
         Assert.Equal(12, atPromotion.Processed);
         Assert.Equal(12, atPromotion.AggregatedMovements);
@@ -246,6 +248,8 @@ public sealed class ConsolidationBootstrapTests(ITestOutputHelper output)
         await rig.StartWorkerAsync(new WorkerStart { Diagnostics = CapturePromotion(rig, p => atPromotion = p) });
         await ConsolidationRig.Eventually(async () => await rig.PhaseAsync() == "live", "live");
 
+        // O callback roda na thread do consumidor logo depois do commit da promoção; a fase live já é visível no banco um instante antes.
+        await ConsolidationRig.Eventually(() => Task.FromResult(atPromotion is not null), "callback da promoção");
         Assert.NotNull(atPromotion);
         Assert.Equal(13, atPromotion.Processed);
         Assert.Equal(13, atPromotion.AggregatedMovements);
@@ -298,6 +302,8 @@ public sealed class ConsolidationBootstrapTests(ITestOutputHelper output)
         AtPromotion? atPromotion = null;
         await rig.StartWorkerAsync(new WorkerStart { Diagnostics = CapturePromotion(rig, p => atPromotion = p) });
         await ConsolidationRig.Eventually(async () => await rig.ProcessedCountAsync() == 14 && await rig.PhaseAsync() == "live", "14 aplicados");
+        // O callback roda na thread do consumidor logo depois do commit da promoção; a fase live já é visível no banco um instante antes.
+        await ConsolidationRig.Eventually(() => Task.FromResult(atPromotion is not null), "callback da promoção");
         Assert.NotNull(atPromotion);
         Assert.Equal(13, atPromotion.Processed);
         Assert.DoesNotContain(fourteenth, atPromotion.ProcessedIds);
@@ -336,6 +342,8 @@ public sealed class ConsolidationBootstrapTests(ITestOutputHelper output)
         AtPromotion? atPromotion = null;
         await rig.StartWorkerAsync(new WorkerStart { Diagnostics = CapturePromotion(rig, p => atPromotion = p) });
         await ConsolidationRig.Eventually(async () => await rig.ProcessedCountAsync() == 2 && await rig.PhaseAsync() == "live", "2 aplicados em live");
+        // O callback roda na thread do consumidor logo depois do commit da promoção; a fase live já é visível no banco um instante antes.
+        await ConsolidationRig.Eventually(() => Task.FromResult(atPromotion is not null), "callback da promoção");
         Assert.NotNull(atPromotion);
         Assert.Equal(0, atPromotion.Processed); // loading sem membros: reconciliação vazia = vazia
         Assert.Equal(0, atPromotion.AggregatedMovements);
@@ -443,7 +451,7 @@ public sealed class ConsolidationBootstrapTests(ITestOutputHelper output)
         var gate = new Gate();
         var points = new TestConsolidationFailurePoints();
         points.AfterProjectionCommitBeforeMarkOnce(async ct => await gate.PassAsync(ct));
-        var first = await rig.StartWorkerAsync(new WorkerStart { FailurePoints = points, ConfigureConsumer = o => o.BatchSize = 1 });
+        var first = await rig.StartWorkerAsync(new WorkerStart { FailurePoints = points, ConfigureConsumer = o => { o.AttemptBudget = TimeSpan.FromSeconds(3); o.LeaseDuration = TimeSpan.FromSeconds(5); } });
         await gate.Reached.WaitAsync(TimeSpan.FromSeconds(20));
         Assert.True(await first.StopAsync(TimeSpan.FromSeconds(10)));
 

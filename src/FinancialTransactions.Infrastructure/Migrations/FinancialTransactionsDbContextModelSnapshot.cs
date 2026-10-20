@@ -207,6 +207,90 @@ namespace FinancialTransactions.Infrastructure.Migrations
                         });
                 });
 
+            modelBuilder.Entity("FinancialTransactions.Domain.OutboxAdminAction", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("event_id");
+
+                    b.Property<string>("OperationId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("operation_id");
+
+                    b.Property<int>("PreviousAttempts")
+                        .HasColumnType("integer")
+                        .HasColumnName("previous_attempts");
+
+                    b.Property<string>("PreviousError")
+                        .HasColumnType("text")
+                        .HasColumnName("previous_error");
+
+                    b.Property<short>("PreviousStatus")
+                        .HasColumnType("smallint")
+                        .HasColumnName("previous_status");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("bigint")
+                        .HasColumnName("sequence");
+
+                    b.HasKey("Id")
+                        .HasName("pk_consolidation_outbox_admin_log");
+
+                    b.HasIndex("EventId")
+                        .HasDatabaseName("ix_consolidation_outbox_admin_log_event_id");
+
+                    b.HasIndex("OperationId", "EventId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_consolidation_outbox_admin_log_operation_event");
+
+                    b.ToTable("consolidation_outbox_admin_log", (string)null);
+                });
+
+            modelBuilder.Entity("FinancialTransactions.Domain.OutboxAdminOperation", b =>
+                {
+                    b.Property<string>("OperationId")
+                        .HasColumnType("text")
+                        .HasColumnName("operation_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int>("EventCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("event_count");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("reason");
+
+                    b.Property<string>("SelectionDigest")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("selection_digest");
+
+                    b.HasKey("OperationId")
+                        .HasName("pk_consolidation_outbox_admin_operation");
+
+                    b.ToTable("consolidation_outbox_admin_operation", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_consolidation_outbox_admin_operation_count", "event_count >= 1");
+                        });
+                });
+
             modelBuilder.Entity("FinancialTransactions.Domain.OutboxEvent", b =>
                 {
                     b.Property<long>("Sequence")
@@ -254,6 +338,22 @@ namespace FinancialTransactions.Infrastructure.Migrations
                         .HasColumnType("text")
                         .HasColumnName("last_error");
 
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("lease_expires_at");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasColumnType("text")
+                        .HasColumnName("lease_owner");
+
+                    b.Property<Guid?>("LeaseToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("lease_token");
+
+                    b.Property<DateTimeOffset?>("NextEligibleAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_eligible_at");
+
                     b.Property<short>("Origin")
                         .HasColumnType("smallint")
                         .HasColumnName("origin");
@@ -292,6 +392,8 @@ namespace FinancialTransactions.Infrastructure.Migrations
                         {
                             t.HasCheckConstraint("ck_consolidation_outbox_attempts", "attempts >= 0");
 
+                            t.HasCheckConstraint("ck_consolidation_outbox_lease_all_or_none", "(lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)");
+
                             t.HasCheckConstraint("ck_consolidation_outbox_origin", "origin IN (0, 1)");
 
                             t.HasCheckConstraint("ck_consolidation_outbox_status", "status IN (0, 1, 2)");
@@ -316,6 +418,16 @@ namespace FinancialTransactions.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_movements_accounts");
+                });
+
+            modelBuilder.Entity("FinancialTransactions.Domain.OutboxAdminAction", b =>
+                {
+                    b.HasOne("FinancialTransactions.Domain.OutboxAdminOperation", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_consolidation_outbox_admin_log_operation");
                 });
 #pragma warning restore 612, 618
         }

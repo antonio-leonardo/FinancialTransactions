@@ -103,6 +103,10 @@ public sealed class TestDiagnostics : IConsolidationDiagnostics
 
     public void EventQuarantined(long sequence) => Add("EventQuarantined", sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
+    public void LeaseAcquired(long sequence) => Add("LeaseAcquired", sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    public void LeaseLost(long sequence, string stage) => Add("LeaseLost", $"{sequence}/{stage}");
+
     private void Add(string kind, string? detail = null, FailureClass? failureClass = null) =>
         _events.Enqueue(new DiagEvent(DateTimeOffset.UtcNow, kind, detail, failureClass));
 }

@@ -17,6 +17,12 @@ public interface IConsolidationDiagnostics
     void ReconciliationFailed(string firstDeviation);
 
     void EventQuarantined(long sequence);
+
+    /// <summary>Esta instância adquiriu a reserva do evento.</summary>
+    void LeaseAcquired(long sequence);
+
+    /// <summary>A posse do evento já não era desta aquisição (vencida ou de outra instância); nada foi sobrescrito.</summary>
+    void LeaseLost(long sequence, string stage);
 }
 
 public sealed partial class LoggingConsolidationDiagnostics(ILogger<LoggingConsolidationDiagnostics> logger) : IConsolidationDiagnostics
@@ -36,6 +42,10 @@ public sealed partial class LoggingConsolidationDiagnostics(ILogger<LoggingConso
 
     public void EventQuarantined(long sequence) => LogEventQuarantined(logger, sequence);
 
+    public void LeaseAcquired(long sequence) => LogLeaseAcquired(logger, sequence);
+
+    public void LeaseLost(long sequence, string stage) => LogLeaseLost(logger, sequence, stage);
+
     [LoggerMessage(EventId = 4000, Level = LogLevel.Debug, Message = "Tentativa do consumidor falhou (classe {FailureClass}, {FailureType}).")]
     private static partial void LogAttemptFailed(ILogger logger, FailureClass failureClass, string failureType);
 
@@ -50,4 +60,10 @@ public sealed partial class LoggingConsolidationDiagnostics(ILogger<LoggingConso
 
     [LoggerMessage(EventId = 4004, Level = LogLevel.Error, Message = "Evento {Sequence} em quarentena depois de tentativas esgotadas.")]
     private static partial void LogEventQuarantined(ILogger logger, long sequence);
+
+    [LoggerMessage(EventId = 4005, Level = LogLevel.Debug, Message = "Reserva adquirida para o evento {Sequence}.")]
+    private static partial void LogLeaseAcquired(ILogger logger, long sequence);
+
+    [LoggerMessage(EventId = 4006, Level = LogLevel.Information, Message = "Posse perdida no evento {Sequence} ({Stage}).")]
+    private static partial void LogLeaseLost(ILogger logger, long sequence, string stage);
 }

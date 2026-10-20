@@ -11,6 +11,11 @@ internal static class WorkerEntryPoint
             return await WorkerApp.RunBackfillAsync(args.Where(a => a != "--backfill").ToArray()).ConfigureAwait(false);
         }
 
+        if (args.FirstOrDefault(a => WorkerAdmin.Modes.Contains(a)) is { } mode)
+        {
+            return await WorkerAdmin.RunAsync(mode, args.Where(a => a != mode).ToArray(), Console.Out).ConfigureAwait(false);
+        }
+
         await WorkerApp.CreateService(args).RunAsync().ConfigureAwait(false);
         return 0;
     }

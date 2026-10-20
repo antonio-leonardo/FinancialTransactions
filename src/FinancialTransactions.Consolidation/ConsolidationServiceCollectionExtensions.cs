@@ -44,11 +44,11 @@ public static class ConsolidationServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>Serviço (consumidor único): fonte, sink de diagnóstico, reconciliador, saúde e o laço.</summary>
+    /// <summary>Serviço (uma instância do consumidor; várias podem coexistir): fonte, sink de diagnóstico, reconciliador, saúde e o laço.</summary>
     public static IServiceCollection AddConsolidationConsumer(this IServiceCollection services, Action<ConsolidationConsumerOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(services);
-        var options = services.AddOptions<ConsolidationConsumerOptions>();
+        var options = services.AddOptions<ConsolidationConsumerOptions>().ValidateOnStart();
         if (configure is not null)
         {
             options.Configure(configure);
@@ -56,7 +56,11 @@ public static class ConsolidationServiceCollectionExtensions
 
         services.TryAddSingleton<IConsolidationDiagnostics, LoggingConsolidationDiagnostics>();
         services.TryAddSingleton<IConsolidationSource, OutboxConsolidationSource>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<ConsolidationConsumerOptions>, ConsolidationConsumerOptionsValidator>());
+        services.TryAddSingleton<ConsolidationInstance>();
+        services.TryAddSingleton<ConsolidationWorkerCounters>();
         services.TryAddSingleton<BootstrapReconciler>();
+        services.TryAddSingleton<BootstrapPromoter>();
         services.AddHostedService<ConsolidationConsumer>();
         return services;
     }

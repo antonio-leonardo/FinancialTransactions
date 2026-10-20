@@ -58,6 +58,69 @@ public static class ReconciliationComparer
             : Differ($"ids: {missing} esperados sem marcador na projeção, {extra} marcadores fora do conjunto");
     }
 
+    /// <summary>
+    /// Os descritores (origem e destino) e o conjunto realmente identificado precisam concordar, inclusive em zero: bootstrap_id pedido,
+    /// bootstrap_id e member_count dos dois lados, cardinalidade dos ids, linhas da Outbox do conjunto, soma de movement_count esperada e
+    /// obtida. Contagem igual não comprova identidade — por isso <see cref="Compare(IEnumerable{DayAggregate}, IEnumerable{DayAggregate}, IReadOnlyCollection{Guid}, IReadOnlyCollection{Guid})"/>
+    /// ainda compara ids e valores. Devolve nulo se tudo concorda.
+    /// </summary>
+    public static ReconciliationResult? VerifyDescriptor(
+        Guid requestedId,
+        CaptureRow? capture,
+        BootstrapStateRow? state,
+        IReadOnlyCollection<Guid> expectedIds,
+        long outboxSetCount,
+        IReadOnlyCollection<DayAggregate> expected,
+        IReadOnlyCollection<DayAggregate> actual,
+        IReadOnlyCollection<Guid> processedIds)
+    {
+        ArgumentNullException.ThrowIfNull(expectedIds);
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(actual);
+        ArgumentNullException.ThrowIfNull(processedIds);
+
+        if (capture is null)
+        {
+            return Differ("registro de controle da origem ausente");
+        }
+
+        if (state is null)
+        {
+            return Differ("linha de bootstrap ausente na projeção");
+        }
+
+        if (capture.BootstrapId != requestedId || state.BootstrapId != requestedId)
+        {
+            return Differ("bootstrap_id do conjunto, da origem e da projeção não coincidem");
+        }
+
+        if (capture.MemberCount != state.MemberCount)
+        {
+            return Differ($"member_count diverge: origem {capture.MemberCount}, projeção {state.MemberCount}");
+        }
+
+        if (expectedIds.Count != capture.MemberCount)
+        {
+            return Differ($"descritor declara {capture.MemberCount} membros; o conjunto identificado na origem tem {expectedIds.Count}");
+        }
+
+        if (outboxSetCount != capture.MemberCount)
+        {
+            return Differ($"descritor declara {capture.MemberCount} membros; a Outbox marca {outboxSetCount}");
+        }
+
+        var expectedMovements = expected.Sum(a => a.Count);
+        if (expectedMovements != expectedIds.Count)
+        {
+            return Differ($"soma de movement_count esperada ({expectedMovements}) difere do número de ids ({expectedIds.Count})");
+        }
+
+        var appliedMovements = actual.Sum(a => a.Count);
+        return appliedMovements != processedIds.Count
+            ? Differ($"soma de movement_count na projeção ({appliedMovements}) difere dos marcadores ({processedIds.Count})")
+            : null;
+    }
+
     private static ReconciliationResult Differ(string deviation) => new(false, deviation);
 
     private static string Describe(DayAggregate? a) =>
@@ -88,29 +151,40 @@ public sealed class BootstrapReconciler(IConsolidationConnectionFactory connecti
         SELECT m.id FROM movements m JOIN consolidation_outbox o ON o.event_id = m.id WHERE o.bootstrap_id = @id
         """;
 
+    private const string OutboxSetCountSql = "SELECT COUNT(*) FROM consolidation_outbox WHERE bootstrap_id = @id";
+
     public async Task<ReconciliationResult> ReconcileAsync(Guid bootstrapId, CancellationToken cancellationToken)
     {
         var strings = connections.Open(ConsolidationConnectionRole.Reconcile);
 
         List<DayAggregate> expected;
         List<Guid> expectedIds;
+        CaptureRow? capture;
+        long outboxSetCount;
         await using (var origin = await BootstrapStore.OpenAsync(strings.Origin, cancellationToken).ConfigureAwait(false))
         await using (var transaction = await origin.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken).ConfigureAwait(false))
         {
             expected = await ReadAggregatesAsync(origin, transaction, OriginAggregateSql, bootstrapId, cancellationToken).ConfigureAwait(false);
             expectedIds = await ReadIdsAsync(origin, transaction, OriginIdsSql, "id", bootstrapId, cancellationToken).ConfigureAwait(false);
+            capture = await BootstrapStore.ReadCaptureAsync(origin, cancellationToken).ConfigureAwait(false);
+            await using var count = new NpgsqlCommand(OutboxSetCountSql, origin, transaction);
+            count.Parameters.AddWithValue("id", bootstrapId);
+            outboxSetCount = (long)(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0L);
         }
 
         List<DayAggregate> actual;
         List<Guid> processedIds;
+        BootstrapStateRow? state;
         await using (var projection = await BootstrapStore.OpenAsync(strings.Projection, cancellationToken).ConfigureAwait(false))
         await using (var transaction = await projection.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken).ConfigureAwait(false))
         {
             actual = await ReadProjectionAggregatesAsync(projection, transaction, cancellationToken).ConfigureAwait(false);
             processedIds = await ReadIdsAsync(projection, transaction, "SELECT event_id FROM processed_events", null, null, cancellationToken).ConfigureAwait(false);
+            state = await BootstrapStore.ReadStateAsync(projection, cancellationToken).ConfigureAwait(false);
         }
 
-        return ReconciliationComparer.Compare(expected, actual, expectedIds, processedIds);
+        return ReconciliationComparer.VerifyDescriptor(bootstrapId, capture, state, expectedIds, outboxSetCount, expected, actual, processedIds)
+            ?? ReconciliationComparer.Compare(expected, actual, expectedIds, processedIds);
     }
 
     private static async Task<List<DayAggregate>> ReadAggregatesAsync(

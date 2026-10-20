@@ -71,6 +71,18 @@ public sealed class OutboxEvent
     public string? LastError { get; private set; }
     public DateTimeOffset? ProcessedAt { get; private set; }
 
+    /// <summary>
+    /// Reserva durável (escrita só pelo consumidor): instância dona, token da aquisição e vencimento, todos nulos ou todos preenchidos.
+    /// Um evento reservado continua <see cref="OutboxStatus.Pending"/>: a reserva não o tira da contagem de não resolvidos.
+    /// </summary>
+    public string? LeaseOwner { get; private set; }
+
+    public Guid? LeaseToken { get; private set; }
+    public DateTimeOffset? LeaseExpiresAt { get; private set; }
+
+    /// <summary>Instante a partir do qual o evento volta a ser elegível depois de uma falha ou liberação com adiamento (relógio da origem).</summary>
+    public DateTimeOffset? NextEligibleAt { get; private set; }
+
     /// <summary>Evento online do movimento recém-criado; deve ser adicionado ao mesmo contexto e salvo na mesma transação.</summary>
     public static OutboxEvent ForMovement(Movement movement, Guid customerId, DateTimeOffset createdAt)
     {

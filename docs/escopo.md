@@ -56,7 +56,7 @@ Além do enunciado, o projeto recebeu **orientações complementares** e, depois
 | H9 | Informação tardia | Admitida: movimento com `effectiveAt` no passado (respeitando H5) pode ser registrado depois; a posição histórica passa a refletir o conhecimento atual. Não há consulta "como se sabia em k". |
 | H10 | Repetição | Header obrigatório `Idempotency-Key`. Identidade = (conta, chave). Conteúdo normalizado = fingerprint SHA-256 de tipo, valor com duas casas invariantes, `effectiveAt` em UTC e descrição. Protocolo em P01: inserir o movimento com a identidade na mesma linha e transação; conflito UNIQUE → reler o existente; fingerprint igual → responder o mesmo movimento; diferente → 422 sem efeito. Autorização é verificada também na repetição. Retenção: sem expiração neste recorte. |
 | H11 | Segurança | JWT bearer com emissor local de desenvolvimento, chave simétrica fornecida por variável de ambiente ou user-secrets, nunca em arquivo versionado. Token carrega o escopo de cliente. Toda rota exige token e autorização por recurso. |
-| H12 | Arquitetura | **Substituída em 19/10/2026 (ciclo P07, decisão D1 do responsável do projeto).** Redação original, mantida para o histórico: uma API ASP.NET Core (Minimal APIs), EF Core com Npgsql, migrations, posição calculada por agregação no banco; sem broker, Outbox, cache, Aspire ou microsserviços. **Redação vigente:** a escrita de lançamentos e a posição por instante continuam na API de lançamentos, com agregação no banco de origem. A consolidação diária roda em processos próprios (Worker e API do consolidado) com banco próprio, alimentados por uma Outbox transacional gravada na origem. Continuam fora: broker de mensagens, cache, Aspire e orquestração de containers. |
+| H12 | Arquitetura | **Substituída em 19/10/2026 (ciclo P07, decisão D1 do responsável do projeto).** Redação original, mantida para o histórico: uma API ASP.NET Core (Minimal APIs), EF Core com Npgsql, migrations, posição calculada por agregação no banco; sem broker, Outbox, cache, Aspire ou microsserviços. **Redação vigente:** a escrita de lançamentos e a posição por instante continuam na API de lançamentos, com agregação no banco de origem. A consolidação diária roda em processos próprios (Worker e API do consolidado) com banco próprio, alimentados por uma Outbox transacional gravada na origem. Continuam fora: broker de mensagens, cache, Aspire e orquestração de containers. **Evolução do ciclo P08 (parte A, decisão do responsável do projeto em 19/10/2026):** o consumo da Outbox deixou de ser de consumidor único; uma reserva durável permite mais de uma instância do Worker (ADR-14). Nenhuma outra parte de H12 mudou. |
 | H13 | Stack | .NET 10 com SDK fixado em `global.json`. PostgreSQL 17 em container Docker, porta publicada no host em `127.0.0.1:15432`. xUnit no runner **VSTest**. |
 | H14 | Estados | Use sempre: proposto; implementado; executado e aprovado; reprovado; bloqueado/não verificado. |
 | H15 | Consolidado diário | **Decisão do responsável do projeto em 19/10/2026 (D2); hipótese do projeto, não requisito do contratante.** Contrato na seção "Contrato do consolidado diário", abaixo. |
@@ -158,13 +158,13 @@ Registradas aqui porque tratam da manutenção do workflow e da forma de aceita�
 
 ## Contrato do consolidado diário (H15, ciclo P07)
 
-Decisão do responsável do projeto em 19/10/2026; **não** é requisito do contratante. Estado: **implementado; executado e aprovado** nos cenários C1 a C15 do ciclo P07 (execução local do executor, 19/10/2026; ver [verificacao.md](verificacao.md), seção 9). A CI ainda não executou esta versão.
+Decisão do responsável do projeto em 19/10/2026; **não** é requisito do contratante. Estado: **implementado; executado e aprovado** nos cenários C1 a C15 do ciclo P07 (execução local do executor, 19/10/2026; ver [verificacao.md](verificacao.md), seção 9). Para o SHA `c7cdec1` há o run 39329327946 (leitura histórica do auditor, 173 + 100 testes); as alterações do ciclo P08 ainda não têm execução na CI.
 
 - **Dia de negócio:** data civil do `effectiveAt` na zona nomeada `America/Sao_Paulo`, não um offset fixo. Início às 00:00 local; fim exclusivo às 00:00 local do dia seguinte. Com offset −03, `2026-09-02T02:59:59.999999Z` pertence a 01/09 e `2026-09-02T03:00:00Z` a 02/09.
 - **Contas no dia D:** entram as de `openedAt` anterior ao fim exclusivo de D. Consulta por conta fora disso: 422 `historico_insuficiente`; por cliente, essas contas vão para `excludedAccounts`; nenhuma incluída: 422.
 - **Parâmetro `day`:** `YYYY-MM-DD` estrito; outra forma ou dia futuro: 422 `validation_error`. O dia corrente é `open`; os anteriores são `closed` no calendário e ainda podem receber informação tardia (H9).
 - **Valores:** `credits`, `debits`, `net` e `movementCount` são do dia; `closingBalance` é a soma de `net` dos dias até D. Informação tardia muda a linha do dia do `effectiveAt` e, por derivação, o `closingBalance` dos dias seguintes; as linhas dos dias seguintes não mudam.
-- **Estado de atualização, conservador e datado:** a resposta informa `unresolvedEvents` (eventos das contas do recorte, de qualquer dia, ainda não confirmados ou em quarentena), `failedEvents`, `observedAt` e `freshness` (`complete`, `stale` ou `unknown`). `complete` afirma só que, em `observedAt`, não havia eventos não confirmados para o recorte; nunca é devolvido com quarentena no recorte.
+- **Estado de atualização, conservador e datado:** a resposta informa `unresolvedEvents` (eventos das contas do recorte, de qualquer dia, ainda não confirmados ou em quarentena), `failedEvents`, `observedAt` e `freshness` (`complete`, `stale` ou `unknown`). `complete` afirma só que, na visão da consulta iniciada em `observedAt`, não foram observados eventos não confirmados para o recorte, e que a projeção foi lida depois; não afirma simultaneidade exata entre relógio, snapshot e resposta. Nunca é devolvido com quarentena no recorte.
 - **Disponibilidade:** o consolidado responde 503 `consolidation_not_ready` até a carga inicial terminar e 503 `dependency_unavailable` quando origem ou projeção não respondem, sem nunca devolver saldo substituto.
 
 ## Decisões do ciclo P07
@@ -174,7 +174,7 @@ Registradas aqui porque afetam o contrato observável e a operação. H12 foi su
 - **Arquitetura (D1):** a escrita e a posição por instante continuam na API de lançamentos; o consolidado diário vive em Worker e API próprios, com banco próprio, alimentados por uma Outbox transacional. Sem broker; broker é alternativa documentada (ADR-10).
 - **Dia de negócio (D2):** data civil do `effectiveAt` em `America/Sao_Paulo` (zona nomeada), com fim exclusivo à meia-noite local. Depende dos dados de fuso da máquina; a comparação medida entre o .NET e o PostgreSQL e o seu limite estão em [arquitetura.md](arquitetura.md), ADR-12.
 - **Posição por instante (D7):** mantida sem mudança de contrato.
-- **Consumidor único e sequencial (declarado):** não há reserva durável nem segunda instância do Worker ou da API do consolidado; isso é o ciclo seguinte.
+- **Consumidor único e sequencial (P07, superado na parte A do ciclo P08):** a restrição de P07 foi alterada intencionalmente por decisão do responsável do projeto; ver "Decisões do ciclo P08 (parte A)" abaixo.
 - **Estado de atualização conservador:** a resposta do consolidado informa `observedAt`, `unresolvedEvents`, `failedEvents` e `freshness`, e nunca afirma completude que não comprovou (ADR-11).
 - **Orçamento da API do consolidado:** 1,5 s por requisição e `Timeout=1;Command Timeout=1`; resposta de falha em até 2 s é **hipótese do projeto**, exercitada só para conexão recusada.
 - **Classes de falha do consumidor:** transitória, ambiente e evento (ADR-13). Só defeito do evento leva à quarentena (5 tentativas); falha de ambiente nunca.
@@ -184,6 +184,18 @@ Registradas aqui porque afetam o contrato observável e a operação. H12 foi su
 - **`observedAt` (correção pós-auditoria):** é o `statement_timestamp()` da instrução que conta os eventos na origem, isto é, o início da observação (o snapshot da contagem é igual ou posterior). Descreve o que foi observado; não é tempo de commit.
 - **Lock do coordenador (correção pós-auditoria):** só a sessão que adquiriu o lock consultivo o libera; a sessão própria é descartada em todos os caminhos.
 - **Ajuste de fixture:** a limpeza dos testes da API de lançamentos passou a apagar também a Outbox por conta, para que os eventos de um teste não contaminem os do seguinte.
+
+## Decisões do ciclo P08 (parte A)
+
+Decisões do responsável do projeto em 19/10/2026; **nada abaixo é requisito do contratante**. As partes B (reconciliação e reconstrução) e C (carga) do mesmo ciclo ainda não foram executadas.
+
+- **Requisito externo (orientações complementares):** o consolidado diário deve aguentar 50 requisições por segundo com perda de no máximo 5%. É **obrigatório**; ainda não há medição específica (parte C).
+- **Reserva durável e várias instâncias do Worker (decisão do projeto):** lease de referência de 45 s com tentativa de 30 s, um evento em voo por instância, confirmação condicional ao token (ADR-14). Altera a restrição de consumidor único de P07. A deduplicação financeira continua no destino.
+- **Reprocessamento administrativo da quarentena (decisão do projeto):** comando restrito, com dry-run, seleção finita, digest do plano, trilha persistida e repetição idempotente; sem edição de payload.
+- **Observação operacional proporcional (decisão do projeto):** `--status` e diagnóstico por instância; sem plataforma de métricas.
+- **Retenção (decisão do projeto):** conservar; nenhum purge automático nesta fatia. Política e medição do crescimento (ADR-14).
+- **Bootstrap com várias instâncias (decisão técnica):** reconciliação e promoção sob exclusividade local ao destino, com releitura da fase, e verificação do `member_count` contra o conjunto identificado.
+- **Fora da parte A:** reverificação ampla da projeção viva, reconstrução em banco paralelo (parte B), ensaio dos 50 req/s (parte C), alta disponibilidade de produção e aceitação final (ciclo P09). Broker, cache, cluster e orquestrador não entram.
 
 ## Cenários da matriz e aplicabilidade
 

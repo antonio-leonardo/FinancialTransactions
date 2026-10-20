@@ -18,6 +18,10 @@ public sealed class OutboxEventConfiguration : IEntityTypeConfiguration<OutboxEv
             table.HasCheckConstraint("ck_consolidation_outbox_status", "status IN (0, 1, 2)");
             table.HasCheckConstraint("ck_consolidation_outbox_origin", "origin IN (0, 1)");
             table.HasCheckConstraint("ck_consolidation_outbox_attempts", "attempts >= 0");
+            // Reserva: dono, token e vencimento andam juntos (todos nulos ou todos preenchidos).
+            table.HasCheckConstraint(
+                "ck_consolidation_outbox_lease_all_or_none",
+                "(lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL) OR (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)");
         });
         builder.HasKey(e => e.Sequence).HasName("pk_consolidation_outbox");
 
@@ -35,6 +39,10 @@ public sealed class OutboxEventConfiguration : IEntityTypeConfiguration<OutboxEv
         builder.Property(e => e.Attempts).HasColumnName("attempts").HasDefaultValue(0).IsRequired();
         builder.Property(e => e.LastError).HasColumnName("last_error").HasColumnType("text");
         builder.Property(e => e.ProcessedAt).HasColumnName("processed_at").HasColumnType("timestamp with time zone");
+        builder.Property(e => e.LeaseOwner).HasColumnName("lease_owner").HasColumnType("text");
+        builder.Property(e => e.LeaseToken).HasColumnName("lease_token");
+        builder.Property(e => e.LeaseExpiresAt).HasColumnName("lease_expires_at").HasColumnType("timestamp with time zone");
+        builder.Property(e => e.NextEligibleAt).HasColumnName("next_eligible_at").HasColumnType("timestamp with time zone");
 
         // Um evento por movimento (event_id = id do movimento). Sem FK para movements: o bootstrap casa por identidade
         // e a Outbox não deve impedir a limpeza de dados de teste.
@@ -48,5 +56,47 @@ public sealed class OutboxEventConfiguration : IEntityTypeConfiguration<OutboxEv
 
         // Estado de atualização do consolidado: pendências e quarentena por conta do recorte.
         builder.HasIndex(e => new { e.AccountId, e.Status }).HasDatabaseName("ix_consolidation_outbox_account_id_status");
+    }
+}
+
+/// <summary>Operações administrativas de reabertura da quarentena (uma linha por identificador de operação).</summary>
+public sealed class OutboxAdminOperationConfiguration : IEntityTypeConfiguration<OutboxAdminOperation>
+{
+    public const string TableName = "consolidation_outbox_admin_operation";
+
+    public void Configure(EntityTypeBuilder<OutboxAdminOperation> builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        builder.ToTable(TableName, table => table.HasCheckConstraint("ck_consolidation_outbox_admin_operation_count", "event_count >= 1"));
+        builder.HasKey(o => o.OperationId).HasName("pk_consolidation_outbox_admin_operation");
+        builder.Property(o => o.OperationId).HasColumnName("operation_id").HasColumnType("text").ValueGeneratedNever();
+        builder.Property(o => o.SelectionDigest).HasColumnName("selection_digest").HasColumnType("text").IsRequired();
+        builder.Property(o => o.Reason).HasColumnName("reason").HasColumnType("text").IsRequired();
+        builder.Property(o => o.EventCount).HasColumnName("event_count").IsRequired();
+        builder.Property(o => o.CreatedAt).HasColumnName("created_at").HasColumnType("timestamp with time zone").IsRequired();
+    }
+}
+
+/// <summary>Trilha de cada evento reaberto, gravada na mesma transação da mudança de estado.</summary>
+public sealed class OutboxAdminActionConfiguration : IEntityTypeConfiguration<OutboxAdminAction>
+{
+    public const string TableName = "consolidation_outbox_admin_log";
+
+    public void Configure(EntityTypeBuilder<OutboxAdminAction> builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        builder.ToTable(TableName);
+        builder.HasKey(a => a.Id).HasName("pk_consolidation_outbox_admin_log");
+        builder.Property(a => a.Id).HasColumnName("id").HasColumnType("bigint").UseIdentityByDefaultColumn();
+        builder.Property(a => a.OperationId).HasColumnName("operation_id").HasColumnType("text").IsRequired();
+        builder.Property(a => a.EventId).HasColumnName("event_id").IsRequired();
+        builder.Property(a => a.Sequence).HasColumnName("sequence").HasColumnType("bigint").IsRequired();
+        builder.Property(a => a.PreviousStatus).HasColumnName("previous_status").HasColumnType("smallint").IsRequired();
+        builder.Property(a => a.PreviousAttempts).HasColumnName("previous_attempts").IsRequired();
+        builder.Property(a => a.PreviousError).HasColumnName("previous_error").HasColumnType("text");
+        builder.Property(a => a.CreatedAt).HasColumnName("created_at").HasColumnType("timestamp with time zone").IsRequired();
+        builder.HasOne<OutboxAdminOperation>().WithMany().HasForeignKey(a => a.OperationId).HasConstraintName("fk_consolidation_outbox_admin_log_operation");
+        builder.HasIndex(a => new { a.OperationId, a.EventId }).IsUnique().HasDatabaseName("ux_consolidation_outbox_admin_log_operation_event");
+        builder.HasIndex(a => a.EventId).HasDatabaseName("ix_consolidation_outbox_admin_log_event_id");
     }
 }

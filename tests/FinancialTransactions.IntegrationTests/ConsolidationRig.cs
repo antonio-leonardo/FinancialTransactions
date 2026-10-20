@@ -267,6 +267,7 @@ public sealed class ConsolidationRig : IAsyncDisposable
                 o.BackoffInitial = TimeSpan.FromMilliseconds(100);
                 o.BackoffMax = TimeSpan.FromSeconds(5);
                 o.AttemptBudget = TimeSpan.FromSeconds(20);
+                o.RetryDelay = TimeSpan.FromMilliseconds(200);
                 start.ConfigureConsumer?.Invoke(o);
             });
         });

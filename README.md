@@ -33,7 +33,8 @@ O estado da CI está na seção [CI](#ci). A matriz de cenários e a aplicabilid
 - correção ou estorno de movimentos;
 - abertura de contas e clientes por API (os cadastros vêm da migration);
 - broker de mensagens e publicação para consumidores externos (a Outbox serve só à consolidação interna; broker é alternativa documentada em [docs/arquitetura.md](docs/arquitetura.md), ADR-10);
-- **consumidor único:** não há reserva durável nem mais de um Worker ou de uma API do consolidado, reprocessamento administrativo da quarentena, métricas, reverificação ampla da projeção nem ensaio dos 50 req/s do consolidado;
+- **ainda pendentes (partes seguintes do ciclo P08):** reverificação ampla da projeção viva, reconstrução de um destino perdido em banco paralelo e o ensaio dos 50 req/s com no máximo 5% de perda do consolidado. Os 50 req/s e os 5% são **requisito obrigatório** das orientações complementares; ainda não existe medição que o demonstre;
+- **purge da Outbox:** a retenção é só política (conservar) e medição do crescimento; nada é apagado automaticamente (ver [docs/arquitetura.md](docs/arquitetura.md), ADR-14);
 - arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal).
 
 Propostas de evolução ficam separadas do que está implementado, em [docs/arquitetura.md](docs/arquitetura.md).
@@ -137,7 +138,36 @@ dotnet run --project src/FinancialTransactions.Consolidation.Api
 
 **Coordenador (`--backfill`).** Captura o conjunto inicial de movimentos (os que já existiam, mais os eventos online anteriores), registra a captura na origem e ativa o destino. Nunca consome eventos e não espera pelo consumo; pode ser reexecutado sem risco. Códigos de saída: `0` ativação feita, ou nada a fazer (conjunto "em andamento" ou "concluído"); `2` origem ou projeção inalcançável, ou configuração inválida; `3` outro coordenador em execução; `4` descritores divergentes ou projeção incoerente (nada foi alterado); `5` resultado do commit da captura desconhecido (a reexecução decide pelo registro de controle).
 
-**Worker (serviço).** É o único consumidor. Sem bootstrap ativado ele **espera sem consumir** (`/health/ready` responde `503 {"status":"Degraded"}`); em `loading` aplica só o conjunto inicial e o reconcilia contra a origem; em `live` aplica a fila inteira. A fase só avança (`loading` para `live`), nunca volta. A API de lançamentos nunca é pausada nem afetada por nenhum desses estados.
+**Worker (serviço).** Pode haver **uma ou mais instâncias** sobre o mesmo par de bancos (ver "Duas instâncias do Worker" abaixo). Sem bootstrap ativado ele **espera sem consumir** (`/health/ready` responde `503 {"status":"Degraded"}`); em `loading` aplica só o conjunto inicial e o reconcilia contra a origem; em `live` aplica a fila inteira. A fase só avança (`loading` para `live`), nunca volta. A API de lançamentos nunca é pausada nem afetada por nenhum desses estados.
+
+#### Duas instâncias do Worker
+
+Cada instância tem uma identidade opaca gerada na inicialização (`w-` e 12 hexadecimais) e reserva **um evento por vez** na Outbox da origem: a reserva é gravada (dono, token da aquisição e vencimento de **45 s**, no relógio do banco de origem) antes de o evento tocar a projeção, e a confirmação só vale com o token e a reserva ainda válida. Uma tentativa tem orçamento de 30 s; a reserva não é renovada. Se um Worker morrer, outro assume o evento depois do vencimento; a soma no destino continua protegida pelo marcador `processed_events`, que a reserva **não** substitui. Para subir uma segunda instância, use outra porta:
+
+```powershell
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --urls http://127.0.0.1:5121
+```
+
+`GET /diagnostics/instance` (somente leitura, sem payload, token nem connection string) devolve a identidade e os contadores da instância: reservas adquiridas, aplicações novas, duplicatas evitadas, confirmações sem resultado, perdas de posse, falhas por classe e quarentenas. Entregas e duplicatas evitadas **não** são movimentos financeiros distintos.
+
+#### Comandos administrativos do Worker
+
+São modos do mesmo executável, sem Kestrel e sem endpoint HTTP de administração. As connection strings vêm do ambiente (`FT__ConnectionStrings__FinancialTransactions` e `FT__ConnectionStrings__Consolidation`); a saída é JSON em stdout.
+
+```powershell
+# Estado operacional, somente leitura: pendentes (inclui os reservados), reservados válidos, expirados elegíveis, quarentena,
+# idade do mais antigo, fase da projeção, tamanhos da Outbox e de processed_events. Dependência inalcançável = "unknown", nunca zero.
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --status
+
+# Eventos em quarentena (sem payload)
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --list-quarantine --limit 50
+
+# Reabrir eventos em quarentena. Dry-run por padrão; aplicar exige a lista finita, o motivo (lista fechada), a confirmação do banco de origem e o digest do plano.
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --requeue --operation op-2026-10-19-a --event <guid> --reason cause_corrected --confirm-origin-database <nome-do-banco>
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --requeue --operation op-2026-10-19-a --event <guid> --reason cause_corrected --confirm-origin-database <nome-do-banco> --apply --plan-digest <digest do dry-run>
+```
+
+Códigos de saída: `0` concluído (ou plano elegível, ou repetição de uma operação já aplicada); `2` banco inalcançável ou configuração inválida; `3` argumentos inválidos ou alvo não confirmado (recusado antes de alterar dados); `4` seleção incompatível com o plano, evento fora da quarentena, ou o mesmo identificador de operação com outra seleção; `5` resultado do commit desconhecido (repetir com o mesmo identificador decide pelo registro). A reabertura só altera eventos em quarentena: zera o contador corrente de tentativas depois de gravar, na mesma transação, a trilha (`consolidation_outbox_admin_log`) com o estado anterior; não apaga `processed_events`, não cria identificadores, não altera movimentos nem valores e **não edita payload**: se a causa não foi corrigida, o evento volta à quarentena. Os motivos aceitos são `cause_corrected`, `dependency_restored` e `false_positive_reviewed`.
 
 **API do consolidado.** Responde `503 consolidation_not_ready` até a fase chegar a `live`.
 
@@ -228,7 +258,7 @@ Resposta real da conta A1 no dia 2026-09-01, capturada na sondagem do ciclo P07 
 
 - `observedAt`: o instante, na origem, em que o servidor recebeu a consulta que conta os eventos (início da observação; o snapshot da contagem é igual ou posterior). Não é tempo de commit.
 - `unresolvedEvents`: eventos das contas do recorte, **de qualquer dia**, ainda não confirmados (pendentes) ou em quarentena. `failedEvents`: os em quarentena.
-- `freshness: "complete"` afirma apenas que, em `observedAt`, **não havia eventos não confirmados** para o recorte; o corpo reflete a projeção lida depois desse instante, e lançamentos posteriores a `observedAt` podem não constar. É sempre `stale` com quarentena no recorte.
+- `freshness: "complete"` afirma apenas que, **na visão da consulta iniciada em `observedAt`**, não foram observados eventos não confirmados para o recorte; a projeção foi lida **depois** disso. Não afirma simultaneidade exata entre o relógio, o snapshot da contagem e a resposta, e lançamentos posteriores podem não constar. É sempre `stale` com quarentena no recorte.
 - `freshness: "stale"` (`stale: true`): havia eventos não confirmados (conservador: um evento já aplicado e ainda não confirmado conta como não resolvido).
 - `freshness: "unknown"`: a leitura da origem falhou depois da autorização e a projeção ainda pôde ser lida; `unresolvedEvents`, `failedEvents`, `stale` e `observedAt` vêm nulos.
 - `maxAppliedSequence` é o **máximo observado** da sequência aplicada nas contas do recorte, não uma fronteira de completude.
@@ -296,7 +326,7 @@ Resultado esperado: **173 testes de unidade e 100 de integração (273)**, todos
 
 ## Ensaio de carga
 
-> **Escopo desta evidência.** O ensaio abaixo e os números de [docs/carga.md](docs/carga.md) são do ciclo P04 (commit `4463e38`), feitos contra a API de lançamentos **antes** da Outbox e dos processos do consolidado. Não medem o consolidado diário nem o POST com a segunda escrita, e não devem ser lidos como medição de P07. O ensaio dos 50 req/s do consolidado continua pendente (P08).
+> **Escopo desta evidência.** O ensaio abaixo e os números de [docs/carga.md](docs/carga.md) são do ciclo P04 (commit `4463e38`), feitos contra a API de lançamentos **antes** da Outbox e dos processos do consolidado. Não medem o consolidado diário nem o POST com a segunda escrita, e não devem ser lidos como medição de P07. O ensaio dos 50 req/s do consolidado continua pendente (parte C do ciclo P08).
 
 Ferramenta de console em `tools/FinancialTransactions.LoadTest` e pré-carga em `tools/FinancialTransactions.LoadTest/seed_load.sql`. O ensaio roda contra a API real e um banco descartável `ft_load_<n>` (nunca o de desenvolvimento), com 200 clientes, 400 contas e 100.000 movimentos pré-carregados, 32 trabalhadores, 10 s de aquecimento e 60 s medidos, e termina com uma reconciliação do banco contra o que a ferramenta registrou como aceito. Resultados, ambiente, planos de consulta e limites: [docs/carga.md](docs/carga.md).
 
@@ -325,7 +355,7 @@ O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) (nome `ci`) roda
 
 O restore e o build rodaram **sem diagnósticos de warning de compilação**. O log do workflow contém avisos de outra natureza (depreciação de módulo do Node, versão de Node declarada pelas actions e mensagens do serviço PostgreSQL sobre a sonda de saúde); estão registrados como pendências de manutenção do workflow em [docs/verificacao.md](docs/verificacao.md).
 
-**Estado desta versão (ciclo P07):** o workflow ganhou o segundo serviço PostgreSQL e a variável `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION`. Fonte: leitura do log da CI pelo auditor-master em 19/10/2026: para o commit `a055816243e29088f47c41d372f23178b4ae7512` há uma execução bem-sucedida, o [run 39321900737](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39321900737) (número 9, job 118297790062), com 173 testes de unidade e 98 de integração aprovados e build com zero warnings. A CI **não** executou a sondagem contra processos reais, as mutações, o ensaio de carga nem o roteiro deste README. A correção posterior a esse commit (ver [docs/verificacao.md](docs/verificacao.md), seção 9.7) ainda não tem execução na CI. Os testes do consolidado têm esperas de tempo real e rodam em runner compartilhado: uma falha intermitente na CI seria registrada, não escondida.
+**Estado desta versão (ciclo P07):** o workflow ganhou o segundo serviço PostgreSQL e a variável `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION`. Fonte: leitura do log da CI pelo auditor-master em 19/10/2026: para o commit `a055816243e29088f47c41d372f23178b4ae7512` há uma execução bem-sucedida, o [run 39321900737](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39321900737) (número 9, job 118297790062), com 173 testes de unidade e 98 de integração aprovados e build com zero warnings. A CI **não** executou a sondagem contra processos reais, as mutações, o ensaio de carga nem o roteiro deste README. Para o commit seguinte, `c7cdec1c0d92592416d3e4738677d4a5fa500199` (que contém a correção da seção 9.7 de [docs/verificacao.md](docs/verificacao.md)), o auditor leu em 19/10/2026 o [run 39329327946](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39329327946) (número 10, tentativa 1, job 118323234355, `completed/success`): build Release de 11 assemblies sem warnings e 173 + 100 testes aprovados. **Leitura histórica do auditor deste SHA**: a CI não executa as alterações posteriores (ciclo P08), que terão a sua própria execução depois de publicadas. Os testes do consolidado têm esperas de tempo real e rodam em runner compartilhado: uma falha intermitente na CI seria registrada, não escondida.
 
 O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício do banco, limite de corpo contra Kestrel real) nem o roteiro deste README, e não publica relatórios de teste. A execução vale para o commit indicado; commits posteriores têm a sua própria execução na página de Actions do repositório.
 
@@ -346,7 +376,7 @@ O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício d
 - `src/FinancialTransactions.Api`: endpoints, autorização por recurso, `ProblemDetails`, caso de uso `RegisterMovement` (grava o movimento e o evento da Outbox na mesma transação).
 - `src/FinancialTransactions.Auth`: JWT local e escopo por cliente, compartilhados pelas duas APIs; não referencia nenhum outro projeto.
 - `src/FinancialTransactions.Consolidation`: núcleo da consolidação (projeção, aplicação idempotente, consumo da Outbox, bootstrap, consultas, saúde).
-- `src/FinancialTransactions.Consolidation.Worker`: executável com dois modos, serviço (consumidor único e saúde) e `--backfill` (coordenador).
+- `src/FinancialTransactions.Consolidation.Worker`: executável com os modos serviço (um consumidor por instância, saúde e diagnóstico da instância), `--backfill` (coordenador) e os comandos administrativos `--status`, `--list-quarantine` e `--requeue`.
 - `src/FinancialTransactions.Consolidation.Api`: API do consolidado diário.
 - `tools/FinancialTransactions.DevToken`: emissor local de tokens.
 - `tools/FinancialTransactions.LoadTest`: ferramenta do ensaio de carga e `seed_load.sql`.
@@ -364,7 +394,7 @@ O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício d
 
 - **Verificação local:** os testes e o ensaio rodaram em ambiente de desenvolvimento (Windows, Docker Desktop, API, ferramenta e banco na mesma máquina). A CI cobre build e testes em Linux, não o ensaio de carga nem as sondagens manuais.
 - **Carga:** os números de [docs/carga.md](docs/carga.md) são de requisições mistas em laço fechado com 32 trabalhadores; não são capacidade máxima, não são transações financeiras por segundo e não valem para produção. A reconciliação não encontrou divergências nas execuções registradas; não foram realizados controles negativos por adulteração para validar integralmente a capacidade de detecção do reconciliador.
-- **Consolidado diário:** é eventualmente consistente e diz o quanto (`freshness`). Consumidor único e sequencial, sem reserva durável: duas instâncias do Worker não são suportadas nesta fatia. O prazo de resposta de falha (≤ 2 s) é hipótese do projeto, exercitada só para conexão recusada. A API do consolidado depende da origem para autorizar (titularidade da conta). Não foi feito ensaio de carga do consolidado (50 req/s com no máximo 5% de perda é requisito das orientações complementares; o ensaio do consolidado está **pendente** (P08) e nada foi demonstrado). O dia de negócio usa os dados de fuso da máquina. As adequações sugeridas e o que falta de cada uma estão em [docs/verificacao.md](docs/verificacao.md).
+- **Consolidado diário:** é eventualmente consistente e diz o quanto (`freshness`). Com reserva durável, várias instâncias do Worker podem consumir a mesma Outbox (lease de 45 s por evento, um evento em voo por instância); a deduplicação financeira continua no destino (`processed_events`) e a reserva não elimina toda execução sobreposta. Duas instâncias no mesmo host demonstram o mecanismo, não alta disponibilidade de produção. O prazo de resposta de falha (≤ 2 s) é hipótese do projeto, exercitada só para conexão recusada. A API do consolidado depende da origem para autorizar (titularidade da conta). Não foi feito ensaio de carga do consolidado (50 req/s com no máximo 5% de perda é requisito das orientações complementares; o ensaio específico do consolidado está **pendente** (parte C do ciclo P08) e nada foi demonstrado). O dia de negócio usa os dados de fuso da máquina. As adequações sugeridas e o que falta de cada uma estão em [docs/verificacao.md](docs/verificacao.md).
 - **Sistema de registro:** não autoriza nem limita saldo; um débito é registrado mesmo que o saldo fique negativo (H1). Não há correção nem estorno.
 - **Tempo:** a posição reflete o conhecimento atual; não há consulta "como se sabia em T2" (H9). `registeredAt` é o instante em que o servidor montou o registro, não o do commit.
 - **Cadastros:** clientes e contas vêm da migration; não há API de cadastro.

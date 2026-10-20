@@ -2,14 +2,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Npgsql;
 
 namespace FinancialTransactions.Consolidation;
 
 public sealed class ConsolidationConsumerOptions
 {
-    public int BatchSize { get; set; } = 50;
-
     /// <summary>Espera quando não há pendentes.</summary>
     public TimeSpan IdleDelay { get; set; } = TimeSpan.FromMilliseconds(500);
 
@@ -20,13 +17,59 @@ public sealed class ConsolidationConsumerOptions
 
     public TimeSpan BackoffMax { get; set; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>Orçamento de uma tentativa; estourá-lo é falha transitória (não é o token do host).</summary>
+    /// <summary>Orçamento de uma tentativa (leitura da fase ou um evento, da aquisição à confirmação); estourá-lo é falha transitória.</summary>
     public TimeSpan AttemptBudget { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Validade da reserva de um evento, medida no relógio da origem. Precisa superar o orçamento da tentativa; sem renovação.</summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(45);
+
+    /// <summary>Eventos processados em sequência (um em voo por vez) antes de reler a fase do bootstrap.</summary>
+    public int MaxEventsPerCycle { get; set; } = 100;
+
+    /// <summary>Adiamento depois de uma falha do evento ou de uma liberação por falha de infraestrutura, no relógio da origem.</summary>
+    public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(1);
 
     public int MaxEventAttempts { get; set; } = 5;
 
     /// <summary>Intervalo mínimo entre dois avisos "aguardando bootstrap".</summary>
     public TimeSpan WaitWarningInterval { get; set; } = TimeSpan.FromMinutes(1);
+}
+
+/// <summary>Valida os parâmetros do consumidor na inicialização: uma configuração incoerente impede o host de subir.</summary>
+public sealed class ConsolidationConsumerOptionsValidator : IValidateOptions<ConsolidationConsumerOptions>
+{
+    public ValidateOptionsResult Validate(string? name, ConsolidationConsumerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var errors = new List<string>();
+        if (options.AttemptBudget <= TimeSpan.Zero)
+        {
+            errors.Add("AttemptBudget precisa ser positivo.");
+        }
+
+        if (options.LeaseDuration <= options.AttemptBudget)
+        {
+            errors.Add("LeaseDuration precisa superar AttemptBudget: a reserva não pode vencer antes do fim da tentativa.");
+        }
+
+        if (options.MaxEventsPerCycle < 1)
+        {
+            errors.Add("MaxEventsPerCycle precisa ser de pelo menos 1.");
+        }
+
+        if (options.MaxEventAttempts < 1)
+        {
+            errors.Add("MaxEventAttempts precisa ser de pelo menos 1.");
+        }
+
+        if (options.RetryDelay < TimeSpan.Zero || options.IdleDelay < TimeSpan.Zero || options.WaitDelay < TimeSpan.Zero
+            || options.BackoffInitial <= TimeSpan.Zero || options.BackoffMax < options.BackoffInitial)
+        {
+            errors.Add("Os intervalos de espera não podem ser negativos, e o backoff exige 0 < inicial <= máximo.");
+        }
+
+        return errors.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(errors);
+    }
 }
 
 /// <summary>Espera exponencial com teto; reinicia depois do primeiro sucesso.</summary>
@@ -54,27 +97,39 @@ public sealed class Backoff
 }
 
 /// <summary>
-/// Consumidor único e sequencial. Cada ciclo lê a fase do bootstrap na projeção, confere o registro de controle da origem e então consome
-/// (somente o conjunto inicial em <c>loading</c>, a fila inteira em <c>live</c>). Cada tentativa usa escopo e <c>DbContext</c> novos. Toda
-/// exceção de um ciclo é capturada aqui: o laço nunca propaga ao host e nunca gira sem espera.
+/// Consumidor de uma instância; várias instâncias podem rodar sobre a mesma Outbox. Cada ciclo lê a fase do bootstrap na projeção, confere
+/// o registro de controle da origem e então consome (somente o conjunto inicial em <c>loading</c>, a fila inteira em <c>live</c>), com no
+/// máximo um evento em voo: reserva durável na origem, aplicação na projeção, confirmação condicional ao token. Cada tentativa usa escopo e
+/// <c>DbContext</c> novos. Toda exceção de um ciclo é capturada aqui: o laço nunca propaga ao host e nunca gira sem espera.
 /// </summary>
 public sealed partial class ConsolidationConsumer(
     IServiceScopeFactory scopes,
     IConsolidationConnectionFactory connections,
     IConsolidationSource source,
-    BootstrapReconciler reconciler,
+    BootstrapPromoter promoter,
     ConsolidationHealthState health,
+    ConsolidationInstance instance,
+    ConsolidationWorkerCounters counters,
     IConsolidationDiagnostics diagnostics,
     IConsolidationFailurePoints failurePoints,
     IOptions<ConsolidationConsumerOptions> options,
     TimeProvider clock,
     ILogger<ConsolidationConsumer> logger) : BackgroundService
 {
+    private static readonly TimeSpan ReleaseTimeout = TimeSpan.FromSeconds(5);
+
     private enum CycleOutcome
     {
         Worked,
         Idle,
         Waiting,
+    }
+
+    private enum Step
+    {
+        Applied,
+        AlreadyApplied,
+        EventFailed,
     }
 
     private readonly ConsolidationConsumerOptions _options = options.Value;
@@ -88,9 +143,7 @@ public sealed partial class ConsolidationConsumer(
             TimeSpan delay;
             try
             {
-                using var budget = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                budget.CancelAfter(_options.AttemptBudget);
-                var outcome = await RunCycleAsync(budget.Token, stoppingToken).ConfigureAwait(false);
+                var outcome = await RunCycleAsync(stoppingToken).ConfigureAwait(false);
                 health.OnCycleCompleted();
                 backoff.Reset();
                 delay = outcome switch
@@ -108,6 +161,7 @@ public sealed partial class ConsolidationConsumer(
                     break;
                 }
 
+                counters.Failed(failureClass);
                 diagnostics.AttemptFailed(failureClass, ex.GetType().Name);
                 if (failureClass == FailureClass.Environment)
                 {
@@ -132,18 +186,37 @@ public sealed partial class ConsolidationConsumer(
         }
     }
 
-    private async Task<CycleOutcome> RunCycleAsync(CancellationToken budget, CancellationToken host)
+    /// <summary>Orçamento próprio, ligado ao token do host: estourá-lo é falha transitória, não encerramento.</summary>
+    private CancellationTokenSource NewBudget(CancellationToken host)
+    {
+        var budget = CancellationTokenSource.CreateLinkedTokenSource(host);
+        budget.CancelAfter(_options.AttemptBudget);
+        return budget;
+    }
+
+    private async Task<CycleOutcome> RunCycleAsync(CancellationToken host)
     {
         var strings = connections.Open(ConsolidationConnectionRole.Consumer);
 
         BootstrapStateRow? state;
-        bool projectionHasData = false;
-        await using (var projection = await BootstrapStore.OpenAsync(strings.Projection, budget).ConfigureAwait(false))
+        CaptureRow? capture = null;
+        var projectionHasData = false;
+        using (var phaseBudget = NewBudget(host))
         {
-            state = await BootstrapStore.ReadStateAsync(projection, budget).ConfigureAwait(false);
-            if (state is null)
+            var budget = phaseBudget.Token;
+            await using (var projection = await BootstrapStore.OpenAsync(strings.Projection, budget).ConfigureAwait(false))
             {
-                projectionHasData = await BootstrapStore.ProjectionHasDataAsync(projection, budget).ConfigureAwait(false);
+                state = await BootstrapStore.ReadStateAsync(projection, budget).ConfigureAwait(false);
+                if (state is null)
+                {
+                    projectionHasData = await BootstrapStore.ProjectionHasDataAsync(projection, budget).ConfigureAwait(false);
+                }
+            }
+
+            if (state is not null)
+            {
+                await using var origin = await BootstrapStore.OpenAsync(strings.Origin, budget).ConfigureAwait(false);
+                capture = await BootstrapStore.ReadCaptureAsync(origin, budget).ConfigureAwait(false);
             }
         }
 
@@ -171,12 +244,6 @@ public sealed partial class ConsolidationConsumer(
         health.Clear(DegradedReason.WaitingForBootstrap);
         health.Clear(DegradedReason.ProjectionIncoherent);
 
-        CaptureRow? capture;
-        await using (var origin = await BootstrapStore.OpenAsync(strings.Origin, budget).ConfigureAwait(false))
-        {
-            capture = await BootstrapStore.ReadCaptureAsync(origin, budget).ConfigureAwait(false);
-        }
-
         if (capture is null || capture.Descriptor != state.Descriptor)
         {
             health.Set(DegradedReason.ControlMismatch);
@@ -188,26 +255,27 @@ public sealed partial class ConsolidationConsumer(
         health.Clear(DegradedReason.ControlMismatch);
 
         return state.Phase == ConsolidationBootstrapState.Live
-            ? await ConsumeLiveAsync(budget, host).ConfigureAwait(false)
-            : await ConsumeLoadingAsync(state, budget, host).ConfigureAwait(false);
+            ? await ConsumeLiveAsync(host).ConfigureAwait(false)
+            : await ConsumeLoadingAsync(state, host).ConfigureAwait(false);
     }
 
-    private async Task<CycleOutcome> ConsumeLiveAsync(CancellationToken budget, CancellationToken host)
+    private async Task<CycleOutcome> ConsumeLiveAsync(CancellationToken host)
     {
         health.Clear(DegradedReason.ReconciliationFailed);
-        var batch = await source.ReadPendingBatchAsync(_options.BatchSize, null, budget).ConfigureAwait(false);
-        return batch.Count == 0 ? CycleOutcome.Idle : await ApplyBatchAsync(batch, budget, host).ConfigureAwait(false);
+        return await DrainAsync(null, host).ConfigureAwait(false) ? CycleOutcome.Worked : CycleOutcome.Idle;
     }
 
-    private async Task<CycleOutcome> ConsumeLoadingAsync(BootstrapStateRow state, CancellationToken budget, CancellationToken host)
+    private async Task<CycleOutcome> ConsumeLoadingAsync(BootstrapStateRow state, CancellationToken host)
     {
-        var batch = await source.ReadPendingBatchAsync(_options.BatchSize, state.BootstrapId, budget).ConfigureAwait(false);
-        if (batch.Count > 0)
+        if (await DrainAsync(state.BootstrapId, host).ConfigureAwait(false))
         {
-            return await ApplyBatchAsync(batch, budget, host).ConfigureAwait(false);
+            return CycleOutcome.Worked;
         }
 
-        // Nada a consumir no conjunto: só reconcilia quando não resta pendente nem quarentena nele.
+        using var budgetSource = NewBudget(host);
+        var budget = budgetSource.Token;
+
+        // Nada a adquirir no conjunto: só reconcilia quando não resta pendente (nem reservado por outra instância) nem quarentena nele.
         var counts = await source.CountSetPendingAsync(state.BootstrapId, budget).ConfigureAwait(false);
         if (counts.Failed > 0)
         {
@@ -221,95 +289,186 @@ public sealed partial class ConsolidationConsumer(
             return CycleOutcome.Idle;
         }
 
-        var result = await reconciler.ReconcileAsync(state.BootstrapId, budget).ConfigureAwait(false);
-        if (!result.Equal)
+        var promotion = await promoter.TryPromoteAsync(state.BootstrapId, budget).ConfigureAwait(false);
+        switch (promotion.Status)
         {
-            health.Set(DegradedReason.ReconciliationFailed);
-            diagnostics.ReconciliationFailed(result.FirstDeviation ?? "divergência");
-            return CycleOutcome.Waiting;
-        }
+            case PromotionStatus.Promoted:
+                health.Clear(DegradedReason.ReconciliationFailed);
+                diagnostics.PhaseChanged(ConsolidationBootstrapState.Live);
+                return CycleOutcome.Worked;
 
-        var promoted = await PromoteAsync(state.BootstrapId, budget).ConfigureAwait(false);
-        if (promoted)
-        {
-            health.Clear(DegradedReason.ReconciliationFailed);
-            diagnostics.PhaseChanged(ConsolidationBootstrapState.Live);
-            return CycleOutcome.Worked;
-        }
+            case PromotionStatus.AlreadyLive:
+                // Outra instância concluiu: sem regressão e sem falso erro de reconciliação. O próximo ciclo lê live.
+                health.Clear(DegradedReason.ReconciliationFailed);
+                return CycleOutcome.Worked;
 
-        // Nenhuma linha afetada: outro estado já ocupa a linha. Nunca sobrescreve live; a próxima leitura decide.
-        LogPromotionNoRows(logger);
-        return CycleOutcome.Waiting;
+            case PromotionStatus.Busy:
+                return CycleOutcome.Idle;
+
+            case PromotionStatus.Diverged:
+                health.Set(DegradedReason.ReconciliationFailed);
+                diagnostics.ReconciliationFailed(promotion.Deviation ?? "divergência");
+                return CycleOutcome.Waiting;
+
+            case PromotionStatus.StateMismatch:
+                health.Set(DegradedReason.ControlMismatch);
+                return CycleOutcome.Waiting;
+
+            default:
+                // Nenhuma linha afetada: outro estado já ocupa a linha. Nunca sobrescreve live; a próxima leitura decide.
+                LogPromotionNoRows(logger);
+                return CycleOutcome.Waiting;
+        }
     }
 
-    /// <summary>Promoção condicional e local, a única do projeto: nunca altera uma linha que já esteja live, e não existe caminho inverso.</summary>
-    private async Task<bool> PromoteAsync(Guid bootstrapId, CancellationToken cancellationToken)
+    /// <summary>Consome em sequência, um evento em voo por vez, até não haver mais elegíveis ou atingir o limite do ciclo. Devolve se houve trabalho.</summary>
+    private async Task<bool> DrainAsync(Guid? bootstrapId, CancellationToken host)
     {
-        await using var connection = await BootstrapStore.OpenAsync(connections.Open(ConsolidationConnectionRole.Reconcile).Projection, cancellationToken).ConfigureAwait(false);
-        await using var command = new NpgsqlCommand(
-            """
-            UPDATE consolidation_bootstrap
-            SET phase = 'live', applied_at = @at, reconciled_at = @at
-            WHERE id = 1 AND bootstrap_id = @id AND phase = 'loading'
-            """,
-            connection);
-        command.Parameters.AddWithValue("at", clock.GetUtcNow());
-        command.Parameters.AddWithValue("id", bootstrapId);
-        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
-    }
-
-    private async Task<CycleOutcome> ApplyBatchAsync(IReadOnlyList<ConsolidationEvent> batch, CancellationToken budget, CancellationToken host)
-    {
-        int applied = 0, alreadyApplied = 0;
-        foreach (var consolidationEvent in batch)
+        int applied = 0, alreadyApplied = 0, worked = 0;
+        try
         {
-            ApplyOutcome outcome;
-            try
+            while (worked < _options.MaxEventsPerCycle)
             {
-                // Escopo e DbContext novos a cada tentativa.
-                using var scope = scopes.CreateScope();
-                scope.ServiceProvider.GetRequiredService<ConsolidationScopeRole>().Role = ConsolidationConnectionRole.Consumer;
-                outcome = await scope.ServiceProvider.GetRequiredService<DailyConsolidationApplier>().ApplyAsync(consolidationEvent, budget).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (FailureClassifier.Classify(ex, host) == FailureClass.Event)
-            {
-                // Defeito do evento: conta tentativa, quarentena na quinta, e o lote segue para o próximo.
-                diagnostics.AttemptFailed(FailureClass.Event, ex.GetType().Name);
-                await source.MarkFailedAsync(consolidationEvent.Sequence, FailureClassifier.Sanitize(ex), _options.MaxEventAttempts, budget).ConfigureAwait(false);
-                if (consolidationEvent.Attempts + 1 >= _options.MaxEventAttempts)
+                var step = await ProcessNextAsync(bootstrapId, host).ConfigureAwait(false);
+                if (step is null)
                 {
-                    diagnostics.EventQuarantined(consolidationEvent.Sequence);
+                    break;
                 }
 
-                continue;
+                worked++;
+                switch (step)
+                {
+                    case Step.Applied:
+                        applied++;
+                        break;
+                    case Step.AlreadyApplied:
+                        alreadyApplied++;
+                        break;
+                }
             }
-
-            await failurePoints.AfterProjectionCommitBeforeMarkAsync(budget).ConfigureAwait(false);
-
-            try
+        }
+        finally
+        {
+            if (applied + alreadyApplied > 0)
             {
-                await source.MarkProcessedAsync(consolidationEvent.Sequence, budget).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (FailureClassifier.Classify(ex, host) != FailureClass.HostCancellation)
-            {
-                // Projeção já confirmada, origem sem resultado: nada é forçado. A próxima leitura determina o estado
-                // (se ficou pendente, a reentrega não soma de novo) e o backoff segue a classe da exceção.
-                LogMarkUnconfirmed(logger, consolidationEvent.Sequence);
-                throw;
-            }
-
-            if (outcome == ApplyOutcome.Applied)
-            {
-                applied++;
-            }
-            else
-            {
-                alreadyApplied++;
+                diagnostics.BatchApplied(applied, alreadyApplied);
             }
         }
 
-        diagnostics.BatchApplied(applied, alreadyApplied);
-        return CycleOutcome.Worked;
+        return worked > 0;
+    }
+
+    /// <summary>
+    /// Adquire, aplica e confirma um evento. Nulo: nenhum elegível. Falha atribuível ao evento é registrada e não propaga; falha de
+    /// infraestrutura libera a reserva própria (se a origem responder) e propaga ao laço, sem contar tentativa do evento.
+    /// </summary>
+    private async Task<Step?> ProcessNextAsync(Guid? bootstrapId, CancellationToken host)
+    {
+        using var budgetSource = NewBudget(host);
+        var budget = budgetSource.Token;
+
+        var leased = await source.AcquireAsync(instance.Id, bootstrapId, _options.LeaseDuration, budget).ConfigureAwait(false);
+        if (leased is null)
+        {
+            return null;
+        }
+
+        counters.Acquired();
+        diagnostics.LeaseAcquired(leased.Event.Sequence);
+        var consolidationEvent = leased.Event;
+
+        ApplyOutcome outcome;
+        try
+        {
+            // Escopo e DbContext novos a cada tentativa.
+            using var scope = scopes.CreateScope();
+            scope.ServiceProvider.GetRequiredService<ConsolidationScopeRole>().Role = ConsolidationConnectionRole.Consumer;
+            outcome = await scope.ServiceProvider.GetRequiredService<DailyConsolidationApplier>().ApplyAsync(consolidationEvent, budget).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (FailureClassifier.Classify(ex, host) == FailureClass.Event)
+        {
+            // Defeito do evento: conta tentativa, quarentena na quinta; a reserva é liberada pelo mesmo comando condicional.
+            counters.EventFailed();
+            diagnostics.AttemptFailed(FailureClass.Event, ex.GetType().Name);
+            var recording = await source.RecordFailureAsync(
+                consolidationEvent.Sequence, leased.Token, FailureClassifier.Sanitize(ex), _options.MaxEventAttempts, _options.RetryDelay, budget).ConfigureAwait(false);
+            switch (recording)
+            {
+                case FailureRecording.LeaseLost:
+                    NoteLeaseLost(consolidationEvent.Sequence, "falha do evento");
+                    break;
+                case FailureRecording.Quarantined:
+                    counters.EventQuarantined();
+                    diagnostics.EventQuarantined(consolidationEvent.Sequence);
+                    break;
+            }
+
+            return Step.EventFailed;
+        }
+        catch (Exception)
+        {
+            // Infraestrutura ou encerramento antes de a aplicação ser confirmada: nenhuma tentativa de evento é contada. Libera a reserva
+            // própria, com adiamento, para não segurá-la até o vencimento; se a origem não responder, o vencimento recupera.
+            await TryReleaseAsync(leased).ConfigureAwait(false);
+            throw;
+        }
+
+        if (outcome == ApplyOutcome.Applied)
+        {
+            counters.Applied();
+        }
+        else
+        {
+            counters.DuplicateAvoided();
+        }
+
+        await failurePoints.AfterProjectionCommitBeforeMarkAsync(budget).ConfigureAwait(false);
+
+        bool confirmed;
+        try
+        {
+            confirmed = await source.ConfirmAsync(consolidationEvent.Sequence, leased.Token, budget).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (FailureClassifier.Classify(ex, host) != FailureClass.HostCancellation)
+        {
+            // Projeção já confirmada, origem sem resultado: nada é forçado nem liberado. A próxima leitura determina o estado
+            // (se ficou pendente, a reentrega não soma de novo) e o backoff segue a classe da exceção.
+            counters.UnconfirmedAcknowledgement();
+            LogMarkUnconfirmed(logger, consolidationEvent.Sequence);
+            throw;
+        }
+
+        if (!confirmed)
+        {
+            // A posse mudou (vencida e readquirida, por exemplo). Nada foi sobrescrito; o dinheiro está protegido pelo marcador.
+            NoteLeaseLost(consolidationEvent.Sequence, "confirmação");
+        }
+
+        return outcome == ApplyOutcome.Applied ? Step.Applied : Step.AlreadyApplied;
+    }
+
+    private async Task TryReleaseAsync(LeasedEvent leased)
+    {
+        using var timeout = new CancellationTokenSource(ReleaseTimeout);
+        try
+        {
+            if (await source.ReleaseAsync(leased.Event.Sequence, leased.Token, _options.RetryDelay, timeout.Token).ConfigureAwait(false))
+            {
+                counters.Released();
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            var failureType = ex.GetType().Name;
+            LogReleaseFailed(logger, leased.Event.Sequence, failureType);
+        }
+    }
+
+    private void NoteLeaseLost(long sequence, string stage)
+    {
+        counters.LeaseLost();
+        diagnostics.LeaseLost(sequence, stage);
+        LogLeaseLost(logger, sequence, stage);
     }
 
     private void WarnWaiting()
@@ -342,4 +501,10 @@ public sealed partial class ConsolidationConsumer(
 
     [LoggerMessage(EventId = 6006, Level = LogLevel.Warning, Message = "Resultado não confirmado: evento {Sequence} aplicado na projeção, mas a origem não confirmou a marcação.")]
     private static partial void LogMarkUnconfirmed(ILogger logger, long sequence);
+
+    [LoggerMessage(EventId = 6007, Level = LogLevel.Warning, Message = "Posse perdida no evento {Sequence} ({Stage}): a reserva venceu ou passou a outra instância; nada foi sobrescrito.")]
+    private static partial void LogLeaseLost(ILogger logger, long sequence, string stage);
+
+    [LoggerMessage(EventId = 6008, Level = LogLevel.Debug, Message = "Não foi possível liberar a reserva do evento {Sequence} ({FailureType}); o vencimento a recupera.")]
+    private static partial void LogReleaseFailed(ILogger logger, long sequence, string failureType);
 }

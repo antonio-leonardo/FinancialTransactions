@@ -32,6 +32,15 @@ public static class WorkerApp
         var app = builder.Build();
         app.MapHealthChecks("/health/live", ConsolidationHealthMapping.LiveOptions()).AllowAnonymous();
         app.MapHealthChecks("/health/ready", ConsolidationHealthMapping.ReadyOptions(ReadyTag)).AllowAnonymous();
+
+        // Diagnóstico desta instância (somente leitura, sem payload, token nem connection string); não é um endpoint de administração.
+        app.MapGet("/diagnostics/instance", (ConsolidationInstance self, ConsolidationWorkerCounters counters, ConsolidationHealthState state) => Results.Json(new
+        {
+            instanceId = self.Id,
+            startedAt = self.StartedAt,
+            degradedReasons = Enum.GetValues<DegradedReason>().Where(state.Has).Select(r => r.ToString()).ToArray(),
+            counters = counters.Snapshot(),
+        })).AllowAnonymous();
         return app;
     }
 
