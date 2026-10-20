@@ -1,6 +1,8 @@
 # Ensaio de carga, consultas e reconciliação
 
 > **Escopo desta evidência (nota do ciclo P07).** Os números deste documento são do ciclo P04 (commit `4463e38`) e valem para aquele cenário: a API de lançamentos antes da Outbox e dos processos do consolidado. O POST atual faz também a escrita da Outbox, e o consolidado diário nunca foi medido aqui. Nada deste documento é medição de P07; o ensaio dos 50 req/s do consolidado continua pendente (parte C do ciclo P08).
+>
+> O ensaio do **consolidado diário** em chegadas abertas (P08, parte C, 20/10/2026) está em [carga-consolidado.md](carga-consolidado.md); ele não reutiliza nem substitui os números abaixo.
 
 Registro do ensaio de carga limitado executado em 19/10/2026 (ciclo P04). Tudo o que está aqui foi medido nesse dia, com os comandos da seção "Como reproduzir". **Não é meta do cliente**: as metas H-L1 a H-L4 são hipóteses do projeto. **Não extrapole para produção**: ambiente de desenvolvedor, API e banco na mesma máquina, Docker Desktop.
 

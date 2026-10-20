@@ -33,7 +33,7 @@ O estado da CI está na seção [CI](#ci). A matriz de cenários e a aplicabilid
 - correção ou estorno de movimentos;
 - abertura de contas e clientes por API (os cadastros vêm da migration);
 - broker de mensagens e publicação para consumidores externos (a Outbox serve só à consolidação interna; broker é alternativa documentada em [docs/arquitetura.md](docs/arquitetura.md), ADR-10);
-- **ainda pendente (parte C do ciclo P08):** o ensaio dos 50 req/s com no máximo 5% de perda do consolidado. Os 50 req/s e os 5% são **requisito obrigatório** das orientações complementares; ainda não existe medição que o demonstre;
+- **ensaio dos 50 req/s do consolidado (parte C do ciclo P08):** executado pelo executor em laboratório local, em chegadas abertas (L1, L2 e L3, duas repetições cada, e a resiliência F08 em três casos): ver [docs/carga-consolidado.md](docs/carga-consolidado.md). Os 50 req/s e os 5% são **requisito obrigatório** das orientações complementares; o prazo de 1.000 ms, a janela de 60 s, a massa de 100.000 movimentos e os 120 s de convergência são **hipóteses de laboratório** do responsável do projeto (D3-P08), não requisitos do contratante. Os resultados valem para esta máquina e esta topologia (tudo no mesmo host), não para produção, e aguardam auditoria independente;
 - **reconstrução online contínua, troca sem indisponibilidade das consultas e retorno transparente ao banco antigo:** a reconstrução em banco paralelo (parte B) exige consumidores e APIs conhecidos parados e não oferece rollback (ver [docs/recuperacao.md](docs/recuperacao.md));
 - **purge da Outbox:** a retenção é só política (conservar) e medição do crescimento; nada é apagado automaticamente (ver [docs/arquitetura.md](docs/arquitetura.md), ADR-14);
 - arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal).
@@ -335,7 +335,7 @@ dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vst
 
 Os testes de integração sobem a API de lançamentos real (`WebApplicationFactory`), o Worker e a API do consolidado (hosts reais, Kestrel em porta livre, no processo de teste) contra **dois** bancos PostgreSQL descartáveis por execução: `ft_test_<hex>` na origem e `ft_cons_test_<hex>` na consolidação, criados e migrados no início e removidos ao final. Os subcasos do bootstrap (C9a a C9h) usam um par de bancos próprio cada. Eles usam por padrão as conexões administrativas `Host=127.0.0.1;Port=15432;Database=postgres;Username=ft;Password=ft_local_dev_only` (origem, `FT_TEST_ADMIN_CONNECTION`) e `Host=127.0.0.1;Port=15433;Database=postgres;Username=ft;Password=ft_local_dev_only` (consolidação, `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION`); para outros servidores, defina as variáveis. **Os dois containers precisam estar `healthy`** (`docker compose up -d --wait`). Os testes do consolidado esperam condições observáveis (consulta ao banco, eventos do consumidor) e usam intervalos reduzidos do laço; os de produção (500 ms, 2 s, backoff de 1 s a 30 s) são cobertos por teste de unidade. A chave JWT dos testes é gerada a cada execução. Para rodar só os testes de unidade (sem banco): `dotnet test tests/FinancialTransactions.UnitTests -c Release --no-build --settings tests/vstest.runsettings`.
 
-Resultado esperado: **173 testes de unidade e 100 de integração (273)**, todos aprovados; os 137 dos ciclos anteriores continuam presentes, pelo nome, e passam. Fonte dos números: *execução local* do executor no ciclo P07 (19/10/2026, duas rodadas); a *governança* reexecuta por conta própria. Comandos, contagens por ciclo, a sondagem contra processos reais e as ressalvas estão em [docs/verificacao.md](docs/verificacao.md). A *CI* tem o seu próprio resultado, na seção [CI](#ci); os contadores locais não são atribuídos à CI nem o contrário.
+Resultado esperado nesta versão: **220 testes de unidade e 145 de integração (365)**, todos aprovados (fonte: *execução local* do executor, duas rodadas completas em 20/10/2026; a CI roda os mesmos comandos, mas só o que ela mesma executar pode ser atribuído a ela). Os 344 casos da versão anterior continuam presentes, pelo nome; os 21 novos são os controles do gerador de carga (`LoadGeneratorTests`).
 
 ## Ensaio de carga
 
@@ -356,6 +356,14 @@ dotnet tools/FinancialTransactions.LoadTest/bin/Release/net10.0/FinancialTransac
 
 A ferramenta usa a mesma `FT__Auth__SigningKey` da API para emitir os tokens, só aceita `--base-url` em `127.0.0.1`/`localhost` e só aceita bancos `ft_load_*`. É um ensaio de desenvolvimento: os números de `docs/carga.md` não valem para produção.
 
+## Ensaio do consolidado (P08, parte C)
+
+O requisito de **50 req/s com no máximo 5% de perda** ao consolidado diário foi medido em chegadas abertas com `tools/FinancialTransactions.LoadTest --mode consolidation-open` (o modo antigo, de laço fechado, é o ensaio histórico do P04). Cenários, critérios, massa de 100.000 movimentos, resultados por repetição, F08, planos das consultas e limites estão em [docs/carga-consolidado.md](docs/carga-consolidado.md), com os comandos para reproduzir sem o kit. Resumo do que foi observado: 3.000 consultas por repetição, todas úteis no prazo de 1.000 ms em L1, L2 e L3 (p99 desde a programação abaixo de 31 ms), 600 de 600 POST aceitos em L3 e nos três casos de F08, reconciliação exata e convergência em menos de 0,7 s depois do produtor. É uma medição de **laboratório numa máquina só**, com hipóteses declaradas; não é uma garantia para produção nem alta disponibilidade.
+
+```powershell
+# Gerador: 3.000 GET a 50/s em 60 s contra uma API do consolidado (banco próprio ft_load_p08_*, manifesto próprio gravado antes)
+dotnet tools/FinancialTransactions.LoadTest/bin/Release/net10.0/FinancialTransactions.LoadTest.dll --mode consolidation-open --scenario L1 --arrival-rate 50 --duration 60 --warmup 10 --read-url http://127.0.0.1:5111 --manifest manifesto.json --out ./saida-l1
+```
 ## CI
 
 O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) (nome `ci`) roda em `push` na `main` e em `pull_request`. Ele usa `ubuntu-latest` com **dois** serviços `postgres:17` (origem em `15432` e consolidação em `15433`, a mesma credencial sintética do `docker-compose.yml`, sem nenhum segredo, ambos com `POSTGRES_DB=postgres` e sonda `pg_isready -U ft -d postgres`), SDK .NET 10.0.x e executa:

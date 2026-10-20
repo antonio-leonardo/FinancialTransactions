@@ -15,6 +15,12 @@ const int ExitPrecondition = 3;
 const int ExitUnexpected = 10;
 const int ExitReconciliation = 20;
 
+// Modos novos (P08, parte C): chegadas abertas contra o consolidado e seed da massa. Sem --mode, vale o laço fechado histórico do P04.
+if (args.Contains("--mode", StringComparer.Ordinal))
+{
+    return await ConsolidationProgram.RunAsync(args).ConfigureAwait(false);
+}
+
 var jsonOptions = new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
 if (!Options.TryParse(args, out var options, out var parseError) || options is null)

@@ -10,6 +10,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="FinancialTransactions.UnitTests" />
+
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="seed_load.sql" />
   </ItemGroup>
 

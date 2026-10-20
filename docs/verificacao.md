@@ -320,7 +320,7 @@ Fonte de cada item: as **adequações sugeridas** após a primeira entrega (ver 
 |---|---|---|---|---|---|
 | 1 | Independência dos lançamentos em relação ao consolidado diário | Processo e banco próprios para a consolidação; Outbox na transação do movimento; a escrita não conhece a projeção. Worker parado, projeção fora do ar e API do consolidado parada não impedem registrar, consultar a posição por instante nem a readiness da escrita | segunda instância da **API** do consolidado (parte B do ciclo P08; duas APIs só no ensaio de carga) | **executado e aprovado** nos cenários C1 a C5 (automatizados e sondagem contra processos reais); a parte A do P08 acrescentou dois Workers (seção 10, aguardando auditoria) | seções 9.2, 9.4, 9.5 e 10 |
 | 2 | Estratégia de processamento e recuperação da consolidação | Classes de falha (transitória, ambiente, evento), *backoff* de 1 s a 30 s, quarentena por marcação (5 tentativas), reentrega idempotente, bootstrap reconciliado por identidade e saúde com desarme | reverificação ampla da projeção viva e reconstrução de destino perdido (parte B do ciclo P08). Desde a parte A: reserva durável, reprocessamento administrativo da quarentena e comando de status (seção 10) | **parcial** | C4, C6a, C6b, C7, C9a a C9h, C12a, C12b, R01 a R08 |
-| 3 | Requisito de 50 req/s com no máximo 5% de perda, associando cada resultado ao cenário | nenhum ensaio do consolidado; o requisito (orientações complementares) está registrado em [escopo.md](escopo.md) como **requisito obrigatório**: o ensaio específico continua pendente (parte C do ciclo P08), mas a sua natureza não é rebaixada a sugestão | ensaio do consolidado em cenário declarado (parte C do P08) | **proposto** | nenhuma (ensaio na parte C do P08) |
+| 3 | Requisito de 50 req/s com no máximo 5% de perda, associando cada resultado ao cenário | medido em laboratório na parte C do P08 (L1, L2, L3 e F08; ver [carga-consolidado.md](carga-consolidado.md) e a seção 14), com as hipóteses D3 declaradas; vale para a máquina e a topologia do ensaio, não para produção | ensaio do consolidado em cenário declarado, com oracle financeiro e reconciliação | **executado pelo executor** (aguarda auditoria; não é aprovação) | `LoadGeneratorTests` (21) e os `resumo.json` dos ensaios (evidência privada) |
 | 4 | Arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal) | pontos de falha parciais descritos em [arquitetura.md](arquitetura.md); **uma** instância de cada processo | `docs/alta-disponibilidade.md` e a escala horizontal (P09) | **proposto** | nenhuma (P09) |
 | 5 | Aderência ao enunciado, distinguindo obrigatório de hipótese | seção "Fontes e procedência" e rótulos "hipótese do projeto" / "decisão do responsável" em [escopo.md](escopo.md) e [arquitetura.md](arquitetura.md) | revisão final da aderência (P09) | **implementado** | [escopo.md](escopo.md) |
 
@@ -421,7 +421,7 @@ Limpeza: processos próprios encerrados pelo PID registrado; os quatro bancos re
 |---|---|
 | CI | Há uma execução bem-sucedida da versão `a055816` (seção 9.3, leitura do auditor-master). A correção da seção 9.7 tem o run 10 do SHA `c7cdec1` (leitura histórica do auditor, seção 9.3); as alterações do ciclo P08 ainda não têm execução na CI. Os testes do consolidado têm esperas de tempo real e rodam em runner compartilhado: intermitência é possível e seria registrada. O log da CI contém a mensagem do servidor `you don't own a lock of type ExclusiveLock`, compatível com o unlock sem posse do coordenador que perdeu a disputa; corrigido em 9.7. |
 | Instâncias do consumidor | Desde a parte A do ciclo P08 há reserva durável, mais de um Worker, reprocessamento administrativo da quarentena e comando de status (seção 10). Seguem pendentes: duas APIs do consolidado exercitadas em ensaio, reverificação ampla da projeção e reconstrução de destino perdido (partes B e C do P08). |
-| Carga do consolidado | 50 req/s com no máximo 5% de perda: **requisito obrigatório** das orientações complementares; ensaio específico **pendente** (parte C do ciclo P08), sem medição até hoje. A meta de ≤ 2 s para a falha de dependência é hipótese do projeto, exercitada só para conexão recusada. |
+| Carga do consolidado | 50 req/s com no máximo 5% de perda: **requisito obrigatório** das orientações complementares; **medido em laboratório** na parte C do P08 (execução local do executor, aguardando auditoria; [carga-consolidado.md](carga-consolidado.md)). A meta de ≤ 2 s para a falha de dependência é hipótese do projeto, exercitada só para conexão recusada. |
 | Alta disponibilidade | **P09**. |
 | Fuso | Medido em 19/10/2026 (473.329 instantes, 2000 a 2026, passo de 30 min): o .NET desta máquina (Windows) e o PostgreSQL concordam de 2004 a 2026 e divergem em 212 instantes de 2000 a 2003. Faixa fora do uso do laboratório (as contas abrem em 2026); declarado em [arquitetura.md](arquitetura.md), ADR-12. O runner Linux da CI usa o `tzdata` do IANA e não foi verificado. |
 | Mutações | As não executadas estão listadas na seção 9.4. |
@@ -584,3 +584,35 @@ A decisão da marca local da promoção é pela pós-condição relida (estado `
 ### 13.5 Limites que continuam
 
 Escala de 100.000 movimentos não medida; exclusividade só entre comandos deste coordenador; dois processos reais do coordenador só simulados por sessão SQL; recuperação de banco/servidor perdido não demonstrada; migrations `AddProjectionRegistry` e `AddRebuildRecovery` não aplicadas nos bancos de desenvolvimento (esta rodada não criou migration).
+
+## 14. Ciclo P08, parte C: ensaio do consolidado em chegadas abertas
+
+**Estado:** implementado e **executado pelo executor** (execução local, 20/10/2026), aguardando auditoria independente. Parte da referência publicada `7977b1e` (a CI desse SHA, run 15, é fato histórico dele e **não** cobre nada da parte C). Não é aprovação da governança nem execução da CI. Método, critérios e resultados completos: [carga-consolidado.md](carga-consolidado.md). A alta disponibilidade de produção (P09) não foi tratada.
+
+### 14.1 O que foi medido
+
+| Cenário | Repetições | Resultado por repetição (cada uma por si) |
+|---|---|---|
+| L1: 3.000 GET por conta a 50/s | 2 | válidas; 3.000 úteis (perda 0%); todos os corpos `complete` e iguais ao oracle; 50 emissões por segundo |
+| L2: 3.000 GET por cliente a 50/s | 2 | idem, com as duas contas e os totais conferidos |
+| L3: 3.000 GET (80% conta, 20% cliente) a 50/s + 600 POST a 10/s, 2 APIs e 2 Workers | 2 | válidas; 3.000 úteis; 1.500 GET por instância; 23 e 27 respostas `stale` dentro do contrato, nenhuma `unknown`; 600 de 600 POST 201; convergência em menos de 1 s; reconciliação exata (origem, projeção, ledger e 100 leituras finais pela API) |
+| F08 (a) Worker 1 encerrado por PID e religado | 1 | 600 de 600 POST 201; convergência em 0,34 s; reconciliação exata |
+| F08 (b) API 1 encerrada e religada | 1 | idem; 17 sondas daquela URL sem resposta durante a falha, a outra URL respondeu todas |
+| F08 (c) container da consolidação parado e religado | 1 | idem; 34 sondas de 60 com 503 por URL; backlog de até 396 eventos (pendência mais antiga 39,5 s); convergência em 0,61 s |
+
+Cada repetição usou um par de bancos novo, clonado de um par de referência que passou pelo bootstrap real da massa de 100.000 movimentos (seed e validação independente em 4,6 s; coordenador 2,5 s; bootstrap até `live` em 1.645 s com um Worker; `--verify` live e convergence em 1,6 s e 1,5 s). A fonte de cada número é o `resumo.json` da ferramenta (evidência privada), calculado pela própria ferramenta; o verificador independente do Worker confirmou live e convergence antes e depois de cada repetição.
+
+### 14.2 Controles do gerador e mutações
+
+- 21 testes novos (`LoadGeneratorTests`): ver a seção 2 de [carga-consolidado.md](carga-consolidado.md). Natureza: servidor sintético em memória, sem o produto; o relógio é controlável (um provedor que "congela" o laço de programação).
+- Mutações dirigidas, em cópia descartável, cada uma com positivo antes e detectada por teste específico: gerador que espera a requisição anterior (reprova `SlowResponses`), tardias e não emitidas fora do denominador (reprova o limite de 150/151), slot atrasado emitido em rajada (reprova `SlotLateBeyondTheTolerance`).
+- Regressão: restore e build `-warnaserror` com rc 0 e 0 avisos; duas rodadas completas de **220 testes de unidade e 145 de integração (365)**, 365 nomes idênticos entre as rodadas, os 344 anteriores presentes, 21 novos.
+
+### 14.3 Limites e desvios
+
+- Máquina única (3 núcleos, 6 processadores lógicos): API, Workers, gerador e os dois PostgreSQL dividem os recursos. Duas APIs e dois Workers num host **não são** alta disponibilidade. Os critérios (1.000 ms, 60 s, 120 s, massa) são hipóteses de laboratório, não requisitos do contratante.
+- A primeira rodada dos cenários foi executada com uma versão anterior da ferramenta; a execução F08 (c) dessa rodada falhou por defeito da própria ferramenta (exceção não tratada ao reler o banco de projeção logo após o religamento do container). Foi corrigido apenas o tratamento de leituras transitórias na espera de convergência e na reconciliação, e **todos** os cenários foram repetidos com a versão final. Os registros da primeira rodada e da execução inválida foram preservados e não entram nos números acima.
+- Os 6 a 8 primeiros POST da janela foram mais lentos (até ~1,7 s), compatível com partida a frio da API de lançamentos; não entram no orçamento de 5% (das consultas) e não foram investigados.
+- A captura e o replay da **reconstrução** em banco paralelo na escala de 100.000 movimentos não foram medidos; foram medidos seed, bootstrap e verificação nessa escala. A escala da reconstrução continua um limite declarado.
+- Nenhuma mudança de índice, consulta, pool ou migration foi necessária: L1, L2 e L3 foram aprovados. O diagnóstico de pendências tem custo proporcional ao histórico da conta (a Outbox é conservada); um índice parcial é a opção se o histórico crescer.
+- O estado deste item da matriz da seção 5 passa a **executado pelo executor**, não a "aprovado".

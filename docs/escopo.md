@@ -189,7 +189,7 @@ Registradas aqui porque afetam o contrato observável e a operação. H12 foi su
 
 Decisões do responsável do projeto em 19/10/2026; **nada abaixo é requisito do contratante**. As partes B (reconciliação e reconstrução) e C (carga) do mesmo ciclo ainda não foram executadas.
 
-- **Requisito externo (orientações complementares):** o consolidado diário deve aguentar 50 requisições por segundo com perda de no máximo 5%. É **obrigatório**; ainda não há medição específica (parte C).
+- **Requisito externo (orientações complementares):** o consolidado diário deve aguentar 50 requisições por segundo com perda de no máximo 5%. É **obrigatório**; foi medido em laboratório na parte C do P08 (ver [carga-consolidado.md](carga-consolidado.md)), com as hipóteses D3 declaradas.
 - **Reserva durável e várias instâncias do Worker (decisão do projeto):** lease de referência de 45 s com tentativa de 30 s, um evento em voo por instância, confirmação condicional ao token (ADR-14). Altera a restrição de consumidor único de P07. A deduplicação financeira continua no destino.
 - **Reprocessamento administrativo da quarentena (decisão do projeto):** comando restrito, com dry-run, seleção finita, digest do plano, trilha persistida e repetição idempotente; sem edição de payload.
 - **Observação operacional proporcional (decisão do projeto):** `--status` e diagnóstico por instância; sem plataforma de métricas.
@@ -204,7 +204,7 @@ Decisões do responsável do projeto em 20/10/2026; **nada abaixo é requisito d
 - **Verificação financeira independente (decisão do projeto):** comando somente leitura que compara a projeção com os movimentos imutáveis da origem, com controles negativos causais (ADR-15).
 - **Reconstrução controlada em banco paralelo (decisão do projeto):** banco novo ao lado do anterior, captura finita selada, replay idempotente, reconciliação do mesmo conjunto e promoção administrativa. **Delimitação:** consumidores e APIs conhecidos parados durante a operação e uma breve interrupção das consultas na promoção; **não** é reconstrução online contínua, **não** é troca sem indisponibilidade e **não** oferece retorno transparente (ver [recuperacao.md](recuperacao.md)).
 - **Retenção sem purge (decisão do projeto):** mantida; a reconstrução usa os movimentos imutáveis e a Outbox é conservada.
-- **Requisito externo (orientações complementares):** os 50 req/s com no máximo 5% de perda continuam **obrigatórios e sem medição**.
+- **Requisito externo (orientações complementares):** os 50 req/s com no máximo 5% de perda continuam **obrigatórios**; a medição é da parte C (seção seguinte).
 
 ## Cenários da matriz e aplicabilidade
 
@@ -228,3 +228,11 @@ Estados segundo H14. "Executado e aprovado" refere-se à execução local regist
 | T14 | Correção e reconciliação | parcial: reconciliação pós-carga executada (identidades e somas); reconciliação do consolidado diário (por conta, dia e identidade) **executada** no bootstrap do ciclo P07 (C2, C9a a C9h) | P04: após a carga, conjunto de ids, campos por linha e soma assinada por conta conferem com o que a ferramenta registrou como aceito, nas duas execuções. Correção de movimentos continua fora de escopo (sem estorno; a posição é derivada e a identidade de cada movimento é preservada pela UNIQUE) |
 | T15 | Mensageria | **executado e aprovado** (ciclo P07, execução local; era "não aplicável" até P06 por H12, que vedava broker e Outbox) | Comunicação assíncrona por trabalho durável no banco, sem broker; broker é alternativa documentada (ADR-10 em [arquitetura.md](arquitetura.md)). Cenários C1 a C15, mais a sondagem contra processos reais, em [verificacao.md](verificacao.md), seção 9 |
 | T16 | Carga e aceitação | carga executada; CI executada com sucesso em `abcdf19c073dc95505010a593126248dc2bcc79a` (run `39201091893`); aceitação em cópia limpa em P06 | P04: duas execuções de 60 s com 32 trabalhadores contra API e PostgreSQL reais, zero erro técnico, reconciliação exata (ver [carga.md](carga.md)). Compilação limpa e testes executados em P04. A CI do commit `abcdf19` executou com sucesso (ver [verificacao.md](verificacao.md)); a aceitação em cópia limpa fica para P06 |
+
+## Decisões do ciclo P08 (parte C)
+
+Decisões do responsável do projeto; **nada abaixo é requisito do contratante**.
+
+- **Requisito externo (orientações complementares):** 50 req/s ao consolidado diário com perda de no máximo 5%. É obrigatório.
+- **Hipótese de laboratório D3-P08 (decisão do projeto):** janela de 10 s de aquecimento e 60 s medidos (3.000 consultas); chegadas abertas; resposta útil = HTTP 200 com corpo que atende ao contrato em até 1.000 ms desde o instante programado; perda sobre o denominador programado; duas repetições por cenário, cada uma em par de bancos novo; convergência em até 120 s depois de cessar o produtor próprio. Não é RTO nem RPO.
+- **Decisão técnica:** gerador de chegadas abertas na ferramenta de carga (a agenda não espera a resposta), massa reproduzível de 100.000 movimentos com Outbox na mesma transação, oracle financeiro por SQL independente, reconciliação final ledger × origem × projeção. Resultados e limites em [carga-consolidado.md](carga-consolidado.md); a alta disponibilidade de produção continua para o ciclo P09.

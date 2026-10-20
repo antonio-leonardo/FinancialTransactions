@@ -104,7 +104,7 @@ Esta fatia **conserva** movimentos, Outbox, marcadores e o conjunto de captura. 
 ## 4. Custos e limites conhecidos
 
 - A exclusividade é um lock consultivo no banco de destino: depende de o destino aceitar conexão e só coordena comandos deste coordenador.
-- A captura mantém **um snapshot longo** na origem enquanto copia R, e grava R numa **única transação** do destino. O teto desta versão é de 250.000 movimentos; o maior volume exercitado nesta parte foi pequeno (dezenas de movimentos), de modo que a **escala de 100.000 movimentos não foi medida aqui** (é objeto da parte C).
+- A captura mantém **um snapshot longo** na origem enquanto copia R, e grava R numa **única transação** do destino. O teto desta versão é de 250.000 movimentos; o maior volume exercitado nesta parte foi pequeno (dezenas de movimentos), de modo que a **captura e o replay da reconstrução na escala de 100.000 movimentos não foram medidos**. A parte C mediu nessa escala o seed, o bootstrap (27,4 min com um Worker) e a verificação, não a reconstrução (ver [carga-consolidado.md](carga-consolidado.md)).
 - O controle de consumidores é por nome de aplicação nas sessões do PostgreSQL. É um controle comprovável, não onisciente.
 - Duas instâncias e um único host demonstram os mecanismos; não são alta disponibilidade de produção.
-- A reconstrução não torna os 50 req/s uma propriedade demonstrada: esse ensaio está pendente.
+- A reconstrução não altera a medição dos 50 req/s, que é da parte C e foi feita sem reconstrução em curso ([carga-consolidado.md](carga-consolidado.md)).
