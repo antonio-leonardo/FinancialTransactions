@@ -544,3 +544,43 @@ Os sete casos foram escritos primeiro, com pontos de sincronização nomeados (i
 - **P08B-04 (documentação apenas):** a verificação de sessões exige acesso ao banco anterior, resolvido no servidor configurado para o destino; recuperação de banco ou servidor definitivamente perdido **não está demonstrada**. Nada foi implementado para isso.
 - **P08B-05:** ver o adendo de procedência do checkpoint complementar. Nesta rodada não houve `git add`, nem `-N`, nem `git reset`.
 - Continuam valendo os limites da parte B: escala de 100.000 movimentos não medida (teto de 250.000, revalidado no snapshot), controle de consumidores por nome de aplicação, dois processos num host não são alta disponibilidade, e as migrations `AddProjectionRegistry` e `AddRebuildRecovery` não foram aplicadas nos bancos de desenvolvimento (esta rodada não criou migration).
+
+## 13. Ciclo P08, parte B: vínculo da origem da operação (P08B2-01)
+
+**Estado:** implementado e **executado pelo executor** (execução local, 20/10/2026), aguardando auditoria independente. Parte da referência publicada `7bc7463` (pai `93f7698`). Não é parecer independente; a parte C **não** foi executada e os 50 req/s com no máximo 5% de perda seguem obrigatórios e sem medição.
+
+**Correspondência de governança.** A mensagem do commit `7bc7463`, "P08 parte C", não corresponde ao conteúdo: o diff tem exatamente os sete arquivos do complemento da parte B (§12). A parte C não foi executada. O histórico não foi alterado.
+
+**CI.** A execução 14 (id `39468539719`, `completed/success`, 199 + 143 = 342 testes) é **histórica**: refere-se ao SHA `7bc7463`, não a esta correção. Esta correção não tem execução remota; qualquer menção futura exige nova consulta.
+
+### 13.1 Defeito e controle
+
+O coordenador persistia `source_database`, mas o cancelamento, a promoção, a reconciliação e a captura retomada usavam a origem configurada sem conferir se era a origem **desta** operação. Uma origem errada, porém acessível e migrada, devolve registro vazio, sem erro de conexão, e isso era lido como "não promovido".
+
+| ID | Consequência no código anterior (Red) | Teste |
+|---|---|---|
+| P08B2-01 | Com a promoção já confirmada na origem verdadeira, `cancel` configurado com outra origem acessível cancelava a operação e respondia sucesso | `R13i` |
+| P08B2-01 | Preparação retomada com outra origem acessível (com cópia do registro de controle e zero movimentos) selava um conjunto R vazio e respondia sucesso | `R13j` |
+
+Os dois testes foram escritos primeiro e reprovaram no código anterior pela causa pretendida (cancelamento aceito; captura selada a partir da origem errada). A origem errada é um banco real descartável (`ft_test_decoy_*`), nunca uma adulteração do alvo. Depois da correção passaram.
+
+### 13.2 O que é validado, e o limite
+
+Sob a exclusividade e antes de usar a origem como autoridade: o nome efetivo do banco (`current_database()`) precisa ser igual ao `source_database` persistido na preparação e, depois da selagem, o identificador histórico do bootstrap do registro de controle da origem precisa ser igual ao `origin_bootstrap_id` persistido. Divergência acessível recusa (saída 4) sem alterar o destino, o registro verdadeiro, a origem divergente nem R; origem ilegível segue desconhecida (saída 2). O descritor nunca é reescrito, nenhuma credencial é lida ou gravada, não há migration nem opção de contorno, e o `replay`, que só opera no destino, não consulta a origem.
+
+**Limite:** o nome de um banco não é identidade global entre servidores. Duas instâncias com bancos homônimos só se distinguem, depois da selagem, pelo identificador histórico; antes da selagem não se distinguem. A verificação do identificador histórico não tem teste isolado (a origem errada dos testes difere também no nome), apenas no conjunto coberto pela mutação MB3-02.
+
+### 13.3 Comandos e resultados (fonte: executor)
+
+- Restore `rc=0`; build Release `-warnaserror` `rc=0`, 0 avisos, 11 assemblies.
+- Duas rodadas completas: unidade **199/199** e integração **145/145** em ambas (quatro execuções com identificadores distintos), 344 nomes idênticos entre as rodadas; os **342** da referência presentes; 2 novos (`R13i`, `R13j`); nenhum caso alterado ou removido.
+- Sondagem com processos reais (10 passos, 0 falhos, 0 vazamentos, containers iguais e saudáveis, bancos `ft_p08_*` removidos): repete os passos da §12 com a validação ativa e acrescenta X5, `cancel` e `promote` pelo CLI real com uma origem errada acessível e migrada: ambos saem com 4, o destino continua `enabled`, a origem errada não recebe registro e a geração do registro verdadeiro não muda; a retomada com a origem correta conclui sem incrementá-la. O estado parcial continua criado por SQL, como declarado na §12.
+- Mutações dirigidas, em cópia descartável, cada uma com positivo antes: nome do banco não comparado (R13j reprova) e nenhuma conferência de vínculo (R13i e R13j reprovam).
+
+### 13.4 Redação sobre zero linhas
+
+A decisão da marca local da promoção é pela pós-condição relida (estado `promoted` e registro da origem igual à projeção), não por uma regra de recusar qualquer zero: uma repetição idempotente que afeta zero linhas sobre um estado já concluído é sucesso. A frase absoluta da §12.1 ("zero linhas ... nunca sucesso") deve ser lida por esta redação.
+
+### 13.5 Limites que continuam
+
+Escala de 100.000 movimentos não medida; exclusividade só entre comandos deste coordenador; dois processos reais do coordenador só simulados por sessão SQL; recuperação de banco/servidor perdido não demonstrada; migrations `AddProjectionRegistry` e `AddRebuildRecovery` não aplicadas nos bancos de desenvolvimento (esta rodada não criou migration).

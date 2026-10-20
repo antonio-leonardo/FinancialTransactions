@@ -250,6 +250,49 @@ public sealed class ConsolidationRig : IAsyncDisposable
     }
 
     private readonly List<string> _rebuildTargets = [];
+    private readonly List<string> _decoyOrigins = [];
+
+    /// <summary>
+    /// Outra origem ACESSÍVEL e migrada (<c>ft_test_decoy_*</c>), sem registro de promoção: simula a configuração errada, porém válida, da origem.
+    /// Com <paramref name="copyCaptureRecordFromThisOrigin"/>, recebe uma cópia do registro de controle do bootstrap da origem verdadeira.
+    /// </summary>
+    public async Task<string> CreateDecoyOriginAsync(bool copyCaptureRecordFromThisOrigin = false)
+    {
+        var name = "ft_test_decoy_" + TestAdmin.Hex();
+        await TestAdmin.CreateDatabaseAsync(TestAdmin.Origin, name);
+        _decoyOrigins.Add(name);
+        var connection = new NpgsqlConnectionStringBuilder(TestAdmin.Origin) { Database = name }.ConnectionString;
+        var options = new DbContextOptionsBuilder<FinancialTransactionsDbContext>().UseNpgsql(connection).Options;
+        await using (var db = new FinancialTransactionsDbContext(options))
+        {
+            await db.Database.MigrateAsync();
+        }
+
+        if (copyCaptureRecordFromThisOrigin)
+        {
+            await using var source = new NpgsqlConnection(OriginConnection);
+            await source.OpenAsync();
+            await using var read = new NpgsqlCommand("SELECT bootstrap_id, member_count, captured_at, snapshot FROM consolidation_bootstrap_capture WHERE id = 1", source);
+            await using var reader = await read.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                var bootstrapId = reader.GetGuid(0);
+                var members = reader.GetInt64(1);
+                var capturedAt = reader.GetFieldValue<DateTimeOffset>(2);
+                var snapshot = reader.GetString(3);
+                await reader.CloseAsync();
+                await ExecuteAsync(
+                    connection,
+                    "INSERT INTO consolidation_bootstrap_capture (id, bootstrap_id, member_count, captured_at, snapshot) VALUES (1, @b, @m, @c, @s)",
+                    ("b", bootstrapId),
+                    ("m", members),
+                    ("c", capturedAt),
+                    ("s", snapshot));
+            }
+        }
+
+        return connection;
+    }
 
     /// <summary>Banco novo, migrado e vazio para a reconstrução (<c>ft_p08_rebuild_*</c>), removido ao final.</summary>
     public async Task<RebuildTarget> CreateRebuildTargetAsync()
@@ -472,7 +515,7 @@ public sealed class ConsolidationRig : IAsyncDisposable
         return result is T typed ? typed : throw new InvalidCastException($"SQL devolveu {result.GetType().Name}; o teste pediu {typeof(T).Name}.");
     }
 
-    private static async Task ExecuteAsync(string connectionString, string sql, (string Name, object? Value)[] parameters)
+    private static async Task ExecuteAsync(string connectionString, string sql, params (string Name, object? Value)[] parameters)
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
@@ -568,6 +611,11 @@ public sealed class ConsolidationRig : IAsyncDisposable
         foreach (var target in _rebuildTargets)
         {
             await TestAdmin.DropDatabaseAsync(TestAdmin.Consolidation, target);
+        }
+
+        foreach (var decoy in _decoyOrigins)
+        {
+            await TestAdmin.DropDatabaseAsync(TestAdmin.Origin, decoy);
         }
 
         await TestAdmin.DropDatabaseAsync(TestAdmin.Origin, OriginDatabase);

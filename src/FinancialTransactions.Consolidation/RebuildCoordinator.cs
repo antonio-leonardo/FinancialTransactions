@@ -191,6 +191,15 @@ public sealed partial class RebuildCoordinator(
                 return new RebuildOutcome(AdminExitCodes.Success, SealedBody("capture", existing, resumed: true));
             }
 
+            if (existing is not null)
+            {
+                var originMismatch = await OriginMismatchAsync(strings.Origin, existing, cancellationToken).ConfigureAwait(false);
+                if (originMismatch is not null)
+                {
+                    return Conflict("capture", originMismatch);
+                }
+            }
+
             var refusals = new List<string>();
             _ = await GatherAsync(strings, request, refusals, cancellationToken).ConfigureAwait(false);
             if (refusals.Count > 0)
@@ -564,6 +573,12 @@ public sealed partial class RebuildCoordinator(
                 return Conflict("reconcile", "não há reconstrução desta operação neste destino");
             }
 
+            var originMismatch = await OriginMismatchAsync(strings.Origin, op, cancellationToken).ConfigureAwait(false);
+            if (originMismatch is not null)
+            {
+                return Conflict("reconcile", originMismatch);
+            }
+
             if (op.State is RebuildStates.Prepared or RebuildStates.Captured or RebuildStates.Cancelled)
             {
                 return Conflict("reconcile", $"o replay ainda não terminou (estado {op.State})");
@@ -610,6 +625,12 @@ public sealed partial class RebuildCoordinator(
             if (op is null || op.OperationLabel != request.OperationLabel)
             {
                 return Conflict("enable", "não há reconstrução desta operação neste destino");
+            }
+
+            var originMismatch = await OriginMismatchAsync(strings.Origin, op, cancellationToken).ConfigureAwait(false);
+            if (originMismatch is not null)
+            {
+                return Conflict("enable", originMismatch);
             }
 
             if (op.State is RebuildStates.Enabled or RebuildStates.Promoted)
@@ -691,6 +712,12 @@ public sealed partial class RebuildCoordinator(
 
             if (current.State == RebuildStates.Enabled)
             {
+                var originMismatch = await OriginMismatchAsync(strings.Origin, current, cancellationToken).ConfigureAwait(false);
+                if (originMismatch is not null)
+                {
+                    return Conflict("cancel", originMismatch);
+                }
+
                 // Só um destino habilitado pode já ter sido tornado ativo na origem. Sem ler o registro, não se afirma que a troca não ocorreu.
                 var registry = await ReadRegistryAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
                 if (registry == current.ProjectionId)
@@ -764,6 +791,12 @@ public sealed partial class RebuildCoordinator(
             if (op is null || op.OperationLabel != request.OperationLabel)
             {
                 return Conflict("promote", "não há reconstrução desta operação neste destino");
+            }
+
+            var originMismatch = await OriginMismatchAsync(strings.Origin, op, cancellationToken).ConfigureAwait(false);
+            if (originMismatch is not null)
+            {
+                return Conflict("promote", originMismatch);
             }
 
             var registry = await ReadRegistryRowAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
@@ -1108,6 +1141,34 @@ public sealed partial class RebuildCoordinator(
     }
 
     // ---------------------------------------------------------------- acesso
+
+    /// <summary>
+    /// Vínculo entre a origem configurada e a origem DESTA operação, conferido sob a exclusividade e antes de usar a origem como autoridade.
+    /// Identidade validada: o nome efetivo do banco (<c>current_database()</c>) igual ao <c>source_database</c> persistido e, depois da selagem,
+    /// o identificador histórico do bootstrap (<c>bootstrap_id</c> do registro de controle) igual ao persistido. O nome não é global entre servidores
+    /// (instâncias homônimas); o identificador histórico reduz, mas não elimina, esse limite. Nada de credencial é lido nem gravado.
+    /// Devolve o motivo da divergência, ou nulo se coincide; origem ilegível lança a exceção do Npgsql (resultado desconhecido, nunca "ausente").
+    /// </summary>
+    private static async Task<string?> OriginMismatchAsync(string origin, RebuildOperation op, CancellationToken cancellationToken)
+    {
+        await using var connection = await BootstrapStore.OpenAsync(origin, cancellationToken).ConfigureAwait(false);
+        var actual = await ScalarAsync<string>(connection, "SELECT current_database()", cancellationToken).ConfigureAwait(false) ?? string.Empty;
+        if (!string.Equals(actual, op.SourceDatabase, StringComparison.Ordinal))
+        {
+            return $"a origem configurada ({actual}) não é a origem desta operação ({op.SourceDatabase}); nada foi alterado";
+        }
+
+        if (op.OriginBootstrapId is { } expected)
+        {
+            var capture = await BootstrapStore.ReadCaptureAsync(connection, cancellationToken).ConfigureAwait(false);
+            if (capture is null || capture.BootstrapId != expected)
+            {
+                return "o registro de controle do bootstrap da origem configurada não é o desta operação; nada foi alterado";
+            }
+        }
+
+        return null;
+    }
 
     private static RebuildOutcome Refused(string reason) => new(AdminExitCodes.Refused, new { state = "refused", reason });
 

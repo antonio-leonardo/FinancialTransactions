@@ -670,4 +670,72 @@ public sealed class ConsolidationRebuildTests(ITestOutputHelper output)
         Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item")); // nenhum R parcial
         Assert.Null(await TargetScalarAsync<string?>(target, "SELECT capture_digest FROM rebuild_operation WHERE id = 1") is { Length: > 0 } digest ? digest : null);
     }
+
+    private static async Task<long> ScalarOnAsync(string connectionString, string sql)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    [Fact(DisplayName = "R13i_PartialPromotionWithAnAccessibleButWrongOrigin_CancelAndPromoteAreRefused_NothingChanges_ResumeWithTheRightOriginCompletes")]
+    public async Task R13iPartialPromotionWithAnAccessibleButWrongOriginCancelAndPromoteAreRefusedNothingChangesResumeWithTheRightOriginCompletes()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13i", target, rig);
+        await RunToEnabledAsync(rig.Rebuilder(target), request);
+        var crash = new ScriptedRebuildPoints { OnPoint = (point, _) => point == RebuildPoints.PromoteAfterRegistry ? throw new InvalidOperationException("queda entre os dois bancos") : Task.CompletedTask };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Rebuilder(target, crash).PromoteAsync(request, CancellationToken.None));
+        var projectionId = await ProjectionIdAsync(target);
+        var generation = await rig.OriginScalarAsync<long>("SELECT generation FROM consolidation_projection_registry WHERE id = 1");
+
+        // Outra origem acessível, migrada, com a tabela de registro vazia (erro de configuração tecnicamente válido).
+        var decoy = await rig.CreateDecoyOriginAsync();
+        var wrong = ConsolidationRig.RebuilderWithOrigin(target, decoy);
+
+        var cancel = await wrong.CancelAsync(request, CancellationToken.None);
+        Assert.True(cancel.ExitCode == AdminExitCodes.Conflict, $"origem errada não pode autorizar o cancelamento: {BodyOf(cancel)}");
+        Assert.Contains("origem", BodyOf(cancel), StringComparison.Ordinal);
+        var promote = await wrong.PromoteAsync(request, CancellationToken.None);
+        Assert.True(promote.ExitCode == AdminExitCodes.Conflict, $"origem errada não pode autorizar a promoção: {BodyOf(promote)}");
+
+        Assert.Equal(RebuildStates.Enabled, await StateAsync(target)); // alvo intacto
+        Assert.Equal(projectionId, await rig.OriginScalarAsync<Guid>("SELECT active_projection_id FROM consolidation_projection_registry WHERE id = 1")); // registro verdadeiro intacto
+        Assert.Equal(generation, await rig.OriginScalarAsync<long>("SELECT generation FROM consolidation_projection_registry WHERE id = 1"));
+        Assert.Equal(0, await ScalarOnAsync(decoy, "SELECT COUNT(*) FROM consolidation_projection_registry")); // a origem errada não recebeu registro
+
+        var resumed = await rig.Rebuilder(target).PromoteAsync(request, CancellationToken.None); // origem verdadeira: conclui a mesma operação
+        Assert.True(resumed.ExitCode == AdminExitCodes.Success, BodyOf(resumed));
+        Assert.Contains("\"resumed\": true", BodyOf(resumed), StringComparison.Ordinal);
+        Assert.Equal(RebuildStates.Promoted, await StateAsync(target));
+        Assert.Equal(generation, await rig.OriginScalarAsync<long>("SELECT generation FROM consolidation_projection_registry WHERE id = 1")); // sem incremento indevido
+    }
+
+    [Fact(DisplayName = "R13j_ResumingAPreparedCaptureWithAWrongAccessibleOrigin_IsRefused_NothingSealed")]
+    public async Task R13jResumingAPreparedCaptureWithAWrongAccessibleOriginIsRefusedNothingSealed()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13j", target);
+        var crash = new ScriptedRebuildPoints { AfterCopy = _ => throw new InvalidOperationException("queda antes do commit da selagem") };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Rebuilder(target, crash).CaptureAsync(request, CancellationToken.None));
+        Assert.Equal(RebuildStates.Prepared, await StateAsync(target));
+
+        // Outra origem acessível, com cópia do registro de controle do bootstrap e zero movimentos: passaria nas pré-condições.
+        var decoy = await rig.CreateDecoyOriginAsync(copyCaptureRecordFromThisOrigin: true);
+        var wrong = await ConsolidationRig.RebuilderWithOrigin(target, decoy).CaptureAsync(request, CancellationToken.None);
+
+        Assert.True(wrong.ExitCode == AdminExitCodes.Conflict, $"a preparação pertence a outra origem: {BodyOf(wrong)}");
+        Assert.Contains("origem", BodyOf(wrong), StringComparison.Ordinal);
+        Assert.Equal(RebuildStates.Prepared, await StateAsync(target)); // nenhum R selado a partir da origem errada
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item"));
+
+        var right = await rig.Rebuilder(target).CaptureAsync(request, CancellationToken.None); // origem verdadeira: captura normalmente
+        Assert.Equal(AdminExitCodes.Success, right.ExitCode);
+        Assert.Equal(RebuildSeed.Plan.Length, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item"));
+    }
 }
