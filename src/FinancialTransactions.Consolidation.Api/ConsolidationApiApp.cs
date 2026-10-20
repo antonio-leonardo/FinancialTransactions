@@ -26,12 +26,13 @@ public static class ConsolidationApiApp
         }
 
         // Prazos próprios desta API (só aqui): Timeout=1;Command Timeout=1 nas duas strings.
-        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 1, commandTimeoutSeconds: 1);
+        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 1, commandTimeoutSeconds: 1, applicationName: ConsolidationApplicationNames.Api);
         builder.Services.AddFinancialTransactionsJwt();
         builder.Services.AddOptions<ConsolidationApiOptions>();
         builder.Services.AddSingleton<AccountOwnership>();
         builder.Services.AddSingleton<UnresolvedEventsQuery>();
         builder.Services.AddSingleton<ConsolidationQueries>();
+        builder.Services.AddSingleton<ProjectionRegistryReader>();
         builder.Services.AddSingleton<DailyConsolidationService>();
         builder.Services.AddHealthChecks().AddCheck<ApiReadinessCheck>("consolidation", failureStatus: HealthStatus.Unhealthy, tags: [ReadyTag]);
         builder.Services.AddProblemDetails();

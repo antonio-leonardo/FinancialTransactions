@@ -33,7 +33,8 @@ O estado da CI está na seção [CI](#ci). A matriz de cenários e a aplicabilid
 - correção ou estorno de movimentos;
 - abertura de contas e clientes por API (os cadastros vêm da migration);
 - broker de mensagens e publicação para consumidores externos (a Outbox serve só à consolidação interna; broker é alternativa documentada em [docs/arquitetura.md](docs/arquitetura.md), ADR-10);
-- **ainda pendentes (partes seguintes do ciclo P08):** reverificação ampla da projeção viva, reconstrução de um destino perdido em banco paralelo e o ensaio dos 50 req/s com no máximo 5% de perda do consolidado. Os 50 req/s e os 5% são **requisito obrigatório** das orientações complementares; ainda não existe medição que o demonstre;
+- **ainda pendente (parte C do ciclo P08):** o ensaio dos 50 req/s com no máximo 5% de perda do consolidado. Os 50 req/s e os 5% são **requisito obrigatório** das orientações complementares; ainda não existe medição que o demonstre;
+- **reconstrução online contínua, troca sem indisponibilidade das consultas e retorno transparente ao banco antigo:** a reconstrução em banco paralelo (parte B) exige consumidores e APIs conhecidos parados e não oferece rollback (ver [docs/recuperacao.md](docs/recuperacao.md));
 - **purge da Outbox:** a retenção é só política (conservar) e medição do crescimento; nada é apagado automaticamente (ver [docs/arquitetura.md](docs/arquitetura.md), ADR-14);
 - arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal).
 
@@ -167,7 +168,19 @@ dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --requeue
 dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --requeue --operation op-2026-10-19-a --event <guid> --reason cause_corrected --confirm-origin-database <nome-do-banco> --apply --plan-digest <digest do dry-run>
 ```
 
-Códigos de saída: `0` concluído (ou plano elegível, ou repetição de uma operação já aplicada); `2` banco inalcançável ou configuração inválida; `3` argumentos inválidos ou alvo não confirmado (recusado antes de alterar dados); `4` seleção incompatível com o plano, evento fora da quarentena, ou o mesmo identificador de operação com outra seleção; `5` resultado do commit desconhecido (repetir com o mesmo identificador decide pelo registro). A reabertura só altera eventos em quarentena: zera o contador corrente de tentativas depois de gravar, na mesma transação, a trilha (`consolidation_outbox_admin_log`) com o estado anterior; não apaga `processed_events`, não cria identificadores, não altera movimentos nem valores e **não edita payload**: se a causa não foi corrigida, o evento volta à quarentena. Os motivos aceitos são `cause_corrected`, `dependency_restored` e `false_positive_reviewed`. O digest do plano inclui a versão da linha na origem: se o evento passou de novo pela quarentena depois do dry-run, o plano antigo é recusado (saída `4`) e é preciso gerar outro.
+Códigos de saída: `0` concluído (ou plano elegível, ou repetição de uma operação já aplicada); `2` banco inalcançável ou configuração inválida; `3` argumentos inválidos ou alvo não confirmado (recusado antes de alterar dados); `4` seleção incompatível com o plano, evento fora da quarentena, ou o mesmo identificador de operação com outra seleção; `5` resultado do commit desconhecido (repetir com o mesmo identificador decide pelo registro). A reabertura só altera eventos em quarentena: zera o contador corrente de tentativas depois de gravar, na mesma transação, a trilha (`consolidation_outbox_admin_log`) com o estado anterior; não apaga `processed_events`, não cria identificadores, não altera movimentos nem valores e **não edita payload**: se a causa não foi corrigida, o evento volta à quarentena. Os motivos aceitos são `cause_corrected`, `dependency_restored` e `false_positive_reviewed`.
+
+#### Verificação financeira e reconstrução
+
+```powershell
+# Compara a projeção com os movimentos imutáveis da origem (somente leitura; 0 coerente, 4 divergente, 2 inalcançável)
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --verify --mode live          # ou convergence | rebuild
+
+# Reconstrução em BANCO NOVO paralelo, em estágios retomáveis (dry-run por padrão; --apply altera dados)
+dotnet run --project src/FinancialTransactions.Consolidation.Worker -- --rebuild --stage plan --operation op-2026-10-20 --confirm-target-database <banco-novo>
+```
+
+A string `Consolidation` do ambiente deve apontar para o **banco novo**, migrado e vazio. A reconstrução exige os Workers e APIs do consolidado parados, copia o conjunto finito de movimentos, reaplica-o de forma idempotente, reconcilia o mesmo conjunto e só promove sem consumidores conectados. Não é reconstrução online contínua nem tem retorno transparente. Todos os estágios, códigos de saída e limites estão em [docs/recuperacao.md](docs/recuperacao.md). O digest do plano inclui a versão da linha na origem: se o evento passou de novo pela quarentena depois do dry-run, o plano antigo é recusado (saída `4`) e é preciso gerar outro.
 
 **API do consolidado.** Responde `503 consolidation_not_ready` até a fase chegar a `live`.
 
@@ -389,6 +402,7 @@ O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício d
 - [docs/arquitetura.md](docs/arquitetura.md): componentes, fluxos, modelo, decisões (ADRs curtas), segurança e evoluções propostas (não implementadas).
 - [docs/verificacao.md](docs/verificacao.md): requisito → implementação → teste, comandos e resultados datados com a fonte de cada um, ambiente, pendências, checklist de entrega e o estado das adequações sugeridas.
 - [docs/carga.md](docs/carga.md): ensaio de carga, reconciliação e planos das consultas.
+- [docs/recuperacao.md](docs/recuperacao.md): verificação financeira somente leitura e reconstrução da projeção em banco paralelo, com seus limites.
 
 ## Limites
 

@@ -8,6 +8,7 @@ public static class Problems
     public const string InsufficientHistoryCode = "historico_insuficiente";
     public const string DependencyUnavailableCode = "dependency_unavailable";
     public const string NotReadyCode = "consolidation_not_ready";
+    public const string ProjectionSupersededCode = "projection_superseded";
     public const string InternalErrorCode = "internal_error";
 
     public static IResult Problem(int statusCode, string code, string detail) =>
@@ -24,6 +25,9 @@ public static class Problems
 
     public static IResult NotReady() =>
         Problem(StatusCodes.Status503ServiceUnavailable, NotReadyCode, "A consolidação inicial ainda não terminou; tente novamente.");
+
+    public static IResult ProjectionSuperseded() =>
+        Problem(StatusCodes.Status503ServiceUnavailable, ProjectionSupersededCode, "Esta projeção não é a ativa (reconstrução promovida); a leitura foi recusada.");
 
     public static IResult Internal() =>
         Problem(StatusCodes.Status500InternalServerError, InternalErrorCode, "Falha inesperada. Consulte o log do servidor.");

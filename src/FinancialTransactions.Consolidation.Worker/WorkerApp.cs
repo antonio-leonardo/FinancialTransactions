@@ -23,7 +23,7 @@ public static class WorkerApp
         }
 
         // O Worker tolera mais: Timeout=5;Command Timeout=15 (a API do consolidado é a que tem orçamento curto).
-        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 5, commandTimeoutSeconds: 15);
+        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 5, commandTimeoutSeconds: 15, applicationName: ConsolidationApplicationNames.Worker);
         builder.Services.AddConsolidationConsumer();
         builder.Services.AddHealthChecks().AddCheck<WorkerReadinessCheck>("consumer", failureStatus: HealthStatus.Unhealthy, tags: [ReadyTag]);
 
@@ -52,7 +52,7 @@ public static class WorkerApp
             ?? Environments.Production;
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = args, EnvironmentName = environment });
         builder.Configuration.AddEnvironmentVariables("FT__");
-        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 5, commandTimeoutSeconds: 15);
+        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 5, commandTimeoutSeconds: 15, applicationName: ConsolidationApplicationNames.Coordinator);
         builder.Services.AddSingleton<BootstrapCoordinator>();
         configure?.Invoke(builder);
 

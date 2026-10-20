@@ -95,6 +95,7 @@ public sealed class DailyConsolidationService(
     AccountOwnership ownership,
     UnresolvedEventsQuery unresolvedQuery,
     ConsolidationQueries queries,
+    ProjectionRegistryReader registry,
     IConsolidationApiFailurePoints failurePoints,
     IOptions<ConsolidationApiOptions> options,
     TimeProvider clock,
@@ -249,10 +250,23 @@ public sealed class DailyConsolidationService(
             Log.DiagnosticReadFailed(logger, ex.GetType().Name);
         }
 
+        // Reconstrução promovida: qual projeção é a ativa é decidido na origem. Esta leitura também precede a da projeção.
+        var activeProjection = await registry.ReadActiveAsync(ct).ConfigureAwait(false);
+
         await failurePoints.BetweenOriginAndProjectionAsync(ct).ConfigureAwait(false);
 
         // 2. Só agora a consulta única à projeção, em conexão nova, READ COMMITTED.
         var snapshot = await queries.ReadAsync(accountIds, day, ct).ConfigureAwait(false);
+        if (activeProjection is { } active && snapshot.ProjectionId != active)
+        {
+            return new Observation(null, null, Problems.ProjectionSuperseded());
+        }
+
+        if (snapshot.RebuildState is not null && snapshot.RebuildState != RebuildStates.Promoted)
+        {
+            return new Observation(null, null, Problems.NotReady());
+        }
+
         return snapshot.Phase == ConsolidationBootstrapState.Live
             ? new Observation(unresolved, snapshot, null)
             : new Observation(null, null, Problems.NotReady());

@@ -25,3 +25,18 @@ public sealed class OutboxAdminAction
     public string? PreviousError { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
+
+/// <summary>
+/// Registro, na origem, de qual projeção é a ativa depois de uma reconstrução promovida (linha única). Enquanto não existe, nenhuma projeção
+/// é considerada substituída. Depois da promoção, um destino com outra identidade (inclusive o antigo, sem identidade) deixa de ser consumido
+/// e de ser servido: a volta ao banco antigo não é um rollback seguro.
+/// </summary>
+public sealed class ProjectionRegistry
+{
+    public short Id { get; set; } = 1;
+    public Guid ActiveProjectionId { get; set; }
+    public long Generation { get; set; }
+    public DateTimeOffset PromotedAt { get; set; }
+    public string OperationLabel { get; set; } = string.Empty;
+    public string PreviousDatabase { get; set; } = string.Empty;
+}

@@ -400,6 +400,43 @@ namespace FinancialTransactions.Infrastructure.Migrations
                         });
                 });
 
+            modelBuilder.Entity("FinancialTransactions.Domain.ProjectionRegistry", b =>
+                {
+                    b.Property<short>("Id")
+                        .HasColumnType("smallint")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("ActiveProjectionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("active_projection_id");
+
+                    b.Property<long>("Generation")
+                        .HasColumnType("bigint")
+                        .HasColumnName("generation");
+
+                    b.Property<string>("OperationLabel")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("operation_label");
+
+                    b.Property<string>("PreviousDatabase")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("previous_database");
+
+                    b.Property<DateTimeOffset>("PromotedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("promoted_at");
+
+                    b.HasKey("Id")
+                        .HasName("pk_consolidation_projection_registry");
+
+                    b.ToTable("consolidation_projection_registry", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_consolidation_projection_registry_single_row", "id = 1");
+                        });
+                });
+
             modelBuilder.Entity("FinancialTransactions.Domain.Account", b =>
                 {
                     b.HasOne("FinancialTransactions.Domain.Customer", null)

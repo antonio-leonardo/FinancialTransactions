@@ -12,7 +12,7 @@ public static class ConsolidationServiceCollectionExtensions
     /// Registra a base comum aos três processos: opções validadas na inicialização, fábrica de conexão de produção, contexto da projeção
     /// por escopo e os pontos de falha em suas versões inertes. O host de teste substitui o que precisa (fábrica, sink, pontos de falha).
     /// </summary>
-    public static IServiceCollection AddConsolidationCore(this IServiceCollection services, int connectTimeoutSeconds, int commandTimeoutSeconds)
+    public static IServiceCollection AddConsolidationCore(this IServiceCollection services, int connectTimeoutSeconds, int commandTimeoutSeconds, string applicationName = "")
     {
         ArgumentNullException.ThrowIfNull(services);
 
@@ -23,6 +23,7 @@ public static class ConsolidationServiceCollectionExtensions
                 options.Projection = configuration.GetConnectionString(ConsolidationConfiguration.ProjectionKey) ?? string.Empty;
                 options.ConnectTimeoutSeconds = connectTimeoutSeconds;
                 options.CommandTimeoutSeconds = commandTimeoutSeconds;
+                options.ApplicationName = applicationName;
             })
             .ValidateOnStart();
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<ConsolidationConnectionOptions>, ConsolidationConnectionOptionsValidator>());
@@ -32,6 +33,9 @@ public static class ConsolidationServiceCollectionExtensions
         services.TryAddSingleton<IConsolidationFailurePoints, NoConsolidationFailurePoints>();
         services.TryAddSingleton<IBootstrapFailurePoints, NoBootstrapFailurePoints>();
         services.TryAddSingleton<IConsolidationApiFailurePoints, NoConsolidationApiFailurePoints>();
+        services.TryAddSingleton<IRebuildFailurePoints, NoRebuildFailurePoints>();
+        services.TryAddSingleton<ProjectionVerifier>();
+        services.TryAddSingleton<RebuildCoordinator>();
         services.TryAddSingleton<ConsolidationHealthState>();
 
         services.TryAddScoped<ConsolidationScopeRole>();

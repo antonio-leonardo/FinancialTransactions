@@ -152,6 +152,9 @@ public sealed class ConsolidationApiHandle(WebApplication app, TestConnectionFac
     }
 }
 
+/// <summary>Banco novo para uma reconstrução.</summary>
+public sealed record RebuildTarget(string Database, string Connection);
+
 public sealed class WorkerStart
 {
     public TestConnectionFactory? Factory { get; set; }
@@ -228,16 +231,57 @@ public sealed class ConsolidationRig : IAsyncDisposable
     }
 
     /// <summary>Strings reais deste par, com os prazos pedidos.</summary>
-    public ConsolidationConnectionStrings Real(int connectTimeout = 2, int commandTimeout = 10) => new(
-        new NpgsqlConnectionStringBuilder(OriginConnection) { Timeout = connectTimeout, CommandTimeout = commandTimeout }.ConnectionString,
-        new NpgsqlConnectionStringBuilder(ProjectionConnection) { Timeout = connectTimeout, CommandTimeout = commandTimeout }.ConnectionString);
+    public ConsolidationConnectionStrings Real(int connectTimeout = 2, int commandTimeout = 10, string? applicationName = null) =>
+        RealWith(ProjectionConnection, applicationName, connectTimeout, commandTimeout);
+
+    /// <summary>Strings da origem deste par com OUTRA projeção (por exemplo, o banco reconstruído).</summary>
+    public ConsolidationConnectionStrings RealWith(string projectionConnection, string? applicationName = null, int connectTimeout = 2, int commandTimeout = 10) => new(
+        WithApp(new NpgsqlConnectionStringBuilder(OriginConnection) { Timeout = connectTimeout, CommandTimeout = commandTimeout }, applicationName),
+        WithApp(new NpgsqlConnectionStringBuilder(projectionConnection) { Timeout = connectTimeout, CommandTimeout = commandTimeout }, applicationName));
+
+    private static string WithApp(NpgsqlConnectionStringBuilder builder, string? applicationName)
+    {
+        if (!string.IsNullOrWhiteSpace(applicationName))
+        {
+            builder.ApplicationName = applicationName;
+        }
+
+        return builder.ConnectionString;
+    }
+
+    private readonly List<string> _rebuildTargets = [];
+
+    /// <summary>Banco novo, migrado e vazio para a reconstrução (<c>ft_p08_rebuild_*</c>), removido ao final.</summary>
+    public async Task<RebuildTarget> CreateRebuildTargetAsync()
+    {
+        var name = "ft_p08_rebuild_" + TestAdmin.Hex();
+        await TestAdmin.CreateDatabaseAsync(TestAdmin.Consolidation, name);
+        _rebuildTargets.Add(name);
+        var connection = new NpgsqlConnectionStringBuilder(TestAdmin.Consolidation) { Database = name }.ConnectionString;
+        var options = new DbContextOptionsBuilder<ConsolidationDbContext>().UseNpgsql(connection).Options;
+        await using (var db = new ConsolidationDbContext(options))
+        {
+            await db.Database.MigrateAsync();
+        }
+
+        return new RebuildTarget(name, connection);
+    }
+
+    public ProjectionVerifier Verifier(string? projectionConnection = null) =>
+        new(new TestConnectionFactory(RealWith(projectionConnection ?? ProjectionConnection, ConsolidationApplicationNames.Admin)));
+
+    public RebuildCoordinator Rebuilder(RebuildTarget target, IRebuildFailurePoints? points = null, IConsolidationFailurePoints? applierPoints = null, long? movementCeiling = null)
+    {
+        var factory = new TestConnectionFactory(RealWith(target.Connection, ConsolidationApplicationNames.Admin));
+        return new RebuildCoordinator(factory, new ProjectionVerifier(factory), points ?? new NoRebuildFailurePoints(), applierPoints ?? new NoConsolidationFailurePoints(), TimeProvider.System, NullLogger<RebuildCoordinator>.Instance, movementCeiling ?? RebuildCoordinator.DefaultMovementCeiling);
+    }
 
     // ---------- hosts ----------
 
     public async Task<WorkerHandle> StartWorkerAsync(WorkerStart? start = null)
     {
         start ??= new WorkerStart();
-        var factory = start.Factory ?? new TestConnectionFactory(Real());
+        var factory = start.Factory ?? new TestConnectionFactory(Real(applicationName: ConsolidationApplicationNames.Worker));
         var diagnostics = start.Diagnostics ?? new TestDiagnostics();
 
         var app = WorkerApp.CreateService([], builder =>
@@ -285,7 +329,7 @@ public sealed class ConsolidationRig : IAsyncDisposable
         ILoggerProvider? logger = null,
         Action<ConsolidationApiOptions>? configureApi = null)
     {
-        var connections = factory ?? new TestConnectionFactory(Real(1, 1));
+        var connections = factory ?? new TestConnectionFactory(Real(1, 1, ConsolidationApplicationNames.Api));
         var app = ConsolidationApiApp.Create([], builder =>
         {
             builder.WebHost.UseUrls("http://127.0.0.1:0");
@@ -512,6 +556,11 @@ public sealed class ConsolidationRig : IAsyncDisposable
         }
 
         await Writes.DisposeAsync();
+        foreach (var target in _rebuildTargets)
+        {
+            await TestAdmin.DropDatabaseAsync(TestAdmin.Consolidation, target);
+        }
+
         await TestAdmin.DropDatabaseAsync(TestAdmin.Origin, OriginDatabase);
         await TestAdmin.DropDatabaseAsync(TestAdmin.Consolidation, ProjectionDatabase);
     }

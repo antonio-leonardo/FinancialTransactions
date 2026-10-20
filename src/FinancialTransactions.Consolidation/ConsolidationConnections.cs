@@ -20,6 +20,12 @@ public enum ConsolidationConnectionRole
 
     /// <summary>Consultas da API do consolidado.</summary>
     Query,
+
+    /// <summary>Verificação financeira somente leitura.</summary>
+    Verify,
+
+    /// <summary>Reconstrução em banco paralelo (captura, replay, reconciliação, habilitação e promoção).</summary>
+    Rebuild,
 }
 
 /// <summary>As duas connection strings resolvidas para um papel: origem (lançamentos e Outbox) e projeção (consolidado).</summary>
@@ -45,6 +51,12 @@ public sealed class ConsolidationConnectionOptions
 
     /// <summary>Segundos de <c>Command Timeout</c> aplicados às duas strings.</summary>
     public int CommandTimeoutSeconds { get; set; } = 15;
+
+    /// <summary>
+    /// <c>Application Name</c> das sessões: permite à promoção da reconstrução provar, em <c>pg_stat_activity</c>, que nenhum Worker nem API
+    /// conhecidos continuam conectados. Vazio: não altera a connection string.
+    /// </summary>
+    public string ApplicationName { get; set; } = string.Empty;
 }
 
 /// <summary>Validação na inicialização: ausência ou valor inválido impede o host de iniciar, com mensagem clara.</summary>
@@ -119,11 +131,17 @@ public sealed class ConfigurationConsolidationConnectionFactory : IConsolidation
 
     private static string WithTimeouts(string connectionString, ConsolidationConnectionOptions options)
     {
-        return new NpgsqlConnectionStringBuilder(connectionString)
+        var builder = new NpgsqlConnectionStringBuilder(connectionString)
         {
             Timeout = options.ConnectTimeoutSeconds,
             CommandTimeout = options.CommandTimeoutSeconds,
-        }.ConnectionString;
+        };
+        if (!string.IsNullOrWhiteSpace(options.ApplicationName))
+        {
+            builder.ApplicationName = options.ApplicationName;
+        }
+
+        return builder.ConnectionString;
     }
 }
 
@@ -131,4 +149,20 @@ public sealed class ConfigurationConsolidationConnectionFactory : IConsolidation
 public sealed class ConsolidationScopeRole
 {
     public ConsolidationConnectionRole Role { get; set; } = ConsolidationConnectionRole.Consumer;
+}
+
+/// <summary>
+/// Nomes de aplicação das sessões de cada processo. A promoção de uma reconstrução recusa se houver sessão de Worker ou de API do
+/// consolidado conectada à origem ou a qualquer um dos destinos: é o único controle comprovável sobre os "consumidores conhecidos".
+/// Processos que não se identificam não são vistos por ele (limite declarado).
+/// </summary>
+public static class ConsolidationApplicationNames
+{
+    public const string Worker = "ft-consolidation-worker";
+    public const string Api = "ft-consolidation-api";
+    public const string Coordinator = "ft-consolidation-coordinator";
+    public const string Admin = "ft-consolidation-admin";
+
+    /// <summary>Prefixos que contam como consumidor ou API do consolidado.</summary>
+    public static readonly IReadOnlyList<string> Consumers = [Worker, Api];
 }

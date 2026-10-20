@@ -48,7 +48,7 @@ public sealed record ProjectionAccountRow(
     long? MaxAppliedSequence);
 
 /// <summary>Resultado da consulta única: fase do bootstrap (nula se não há linha) e uma linha por conta pedida.</summary>
-public sealed record ProjectionSnapshot(string? Phase, IReadOnlyList<ProjectionAccountRow> Accounts);
+public sealed record ProjectionSnapshot(string? Phase, IReadOnlyList<ProjectionAccountRow> Accounts, Guid? ProjectionId = null, string? RebuildState = null);
 
 /// <summary>
 /// Consulta única à projeção por recorte e dia: a fase do bootstrap, a linha do dia e a soma acumulada até o dia saem da <b>mesma</b> instrução SQL,
@@ -59,6 +59,8 @@ public sealed class ConsolidationQueries(IConsolidationConnectionFactory connect
 {
     private const string Sql = """
         SELECT (SELECT phase FROM consolidation_bootstrap WHERE id = 1) AS phase,
+               (SELECT projection_id FROM rebuild_operation WHERE id = 1) AS projection_id,
+               (SELECT state FROM rebuild_operation WHERE id = 1) AS rebuild_state,
                a.account_id,
                COALESCE(d.credits, 0),
                COALESCE(d.debits, 0),
@@ -87,21 +89,35 @@ public sealed class ConsolidationQueries(IConsolidationConnectionFactory connect
         command.Parameters.AddWithValue("day", day);
 
         string? phase = null;
+        Guid? projectionId = null;
+        string? rebuildState = null;
         var rows = new List<ProjectionAccountRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             phase = reader.IsDBNull(0) ? null : reader.GetString(0);
+            projectionId = reader.IsDBNull(1) ? null : reader.GetGuid(1);
+            rebuildState = reader.IsDBNull(2) ? null : reader.GetString(2);
             rows.Add(new ProjectionAccountRow(
-                reader.GetGuid(1),
-                reader.GetDecimal(2),
-                reader.GetDecimal(3),
+                reader.GetGuid(3),
                 reader.GetDecimal(4),
-                reader.GetInt64(5),
+                reader.GetDecimal(5),
                 reader.GetDecimal(6),
-                reader.IsDBNull(7) ? null : reader.GetInt64(7)));
+                reader.GetInt64(7),
+                reader.GetDecimal(8),
+                reader.IsDBNull(9) ? null : reader.GetInt64(9)));
         }
 
-        return new ProjectionSnapshot(phase, rows);
+        return new ProjectionSnapshot(phase, rows, projectionId, rebuildState);
+    }
+}
+
+/// <summary>Projeção ativa registrada na origem depois de uma promoção de reconstrução (nulo: nenhuma promoção, nada foi substituído).</summary>
+public sealed class ProjectionRegistryReader(IConsolidationConnectionFactory connections)
+{
+    public async Task<Guid?> ReadActiveAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await BootstrapStore.OpenAsync(connections.Open(ConsolidationConnectionRole.Query).Origin, cancellationToken).ConfigureAwait(false);
+        return await BootstrapStore.ReadRegistryAsync(connection, cancellationToken).ConfigureAwait(false);
     }
 }

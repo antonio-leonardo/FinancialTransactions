@@ -100,3 +100,22 @@ public sealed class OutboxAdminActionConfiguration : IEntityTypeConfiguration<Ou
         builder.HasIndex(a => a.EventId).HasDatabaseName("ix_consolidation_outbox_admin_log_event_id");
     }
 }
+
+/// <summary>Projeção ativa depois de uma promoção administrativa (linha única).</summary>
+public sealed class ProjectionRegistryConfiguration : IEntityTypeConfiguration<ProjectionRegistry>
+{
+    public const string TableName = "consolidation_projection_registry";
+
+    public void Configure(EntityTypeBuilder<ProjectionRegistry> builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        builder.ToTable(TableName, table => table.HasCheckConstraint("ck_consolidation_projection_registry_single_row", "id = 1"));
+        builder.HasKey(r => r.Id).HasName("pk_consolidation_projection_registry");
+        builder.Property(r => r.Id).HasColumnName("id").HasColumnType("smallint").ValueGeneratedNever();
+        builder.Property(r => r.ActiveProjectionId).HasColumnName("active_projection_id").IsRequired();
+        builder.Property(r => r.Generation).HasColumnName("generation").HasColumnType("bigint").IsRequired();
+        builder.Property(r => r.PromotedAt).HasColumnName("promoted_at").HasColumnType("timestamp with time zone").IsRequired();
+        builder.Property(r => r.OperationLabel).HasColumnName("operation_label").HasColumnType("text").IsRequired();
+        builder.Property(r => r.PreviousDatabase).HasColumnName("previous_database").HasColumnType("text").IsRequired();
+    }
+}

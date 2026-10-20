@@ -197,6 +197,15 @@ Decisões do responsável do projeto em 19/10/2026; **nada abaixo é requisito d
 - **Bootstrap com várias instâncias (decisão técnica):** reconciliação e promoção sob exclusividade local ao destino, com releitura da fase, e verificação do `member_count` contra o conjunto identificado.
 - **Fora da parte A:** reverificação ampla da projeção viva, reconstrução em banco paralelo (parte B), ensaio dos 50 req/s (parte C), alta disponibilidade de produção e aceitação final (ciclo P09). Broker, cache, cluster e orquestrador não entram.
 
+## Decisões do ciclo P08 (parte B)
+
+Decisões do responsável do projeto em 20/10/2026; **nada abaixo é requisito do contratante**. A parte C (ensaio dos 50 req/s) não foi executada.
+
+- **Verificação financeira independente (decisão do projeto):** comando somente leitura que compara a projeção com os movimentos imutáveis da origem, com controles negativos causais (ADR-15).
+- **Reconstrução controlada em banco paralelo (decisão do projeto):** banco novo ao lado do anterior, captura finita selada, replay idempotente, reconciliação do mesmo conjunto e promoção administrativa. **Delimitação:** consumidores e APIs conhecidos parados durante a operação e uma breve interrupção das consultas na promoção; **não** é reconstrução online contínua, **não** é troca sem indisponibilidade e **não** oferece retorno transparente (ver [recuperacao.md](recuperacao.md)).
+- **Retenção sem purge (decisão do projeto):** mantida; a reconstrução usa os movimentos imutáveis e a Outbox é conservada.
+- **Requisito externo (orientações complementares):** os 50 req/s com no máximo 5% de perda continuam **obrigatórios e sem medição**.
+
 ## Cenários da matriz e aplicabilidade
 
 Estados segundo H14. "Executado e aprovado" refere-se à execução local registrada no checkpoint do ciclo, não a CI.

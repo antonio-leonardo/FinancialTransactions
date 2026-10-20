@@ -139,6 +139,141 @@ namespace FinancialTransactions.Consolidation.Migrations
 
                     b.ToTable("processed_events", (string)null);
                 });
+
+            modelBuilder.Entity("FinancialTransactions.Consolidation.RebuildCaptureItem", b =>
+                {
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("event_id");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("account_id");
+
+                    b.Property<decimal>("Amount")
+                        .HasColumnType("numeric(18,2)")
+                        .HasColumnName("amount");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("customer_id");
+
+                    b.Property<DateTimeOffset>("EffectiveAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_at");
+
+                    b.Property<bool>("PayloadDiverges")
+                        .HasColumnType("boolean")
+                        .HasColumnName("payload_diverges");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("bigint")
+                        .HasColumnName("sequence");
+
+                    b.Property<short>("Type")
+                        .HasColumnType("smallint")
+                        .HasColumnName("type");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_rebuild_capture_item");
+
+                    b.HasIndex("Sequence")
+                        .HasDatabaseName("ix_rebuild_capture_item_sequence");
+
+                    b.ToTable("rebuild_capture_item", (string)null);
+                });
+
+            modelBuilder.Entity("FinancialTransactions.Consolidation.RebuildOperation", b =>
+                {
+                    b.Property<short>("Id")
+                        .HasColumnType("smallint")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset?>("CancelledAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("cancelled_at");
+
+                    b.Property<long?>("CaptureCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("capture_count");
+
+                    b.Property<string>("CaptureDigest")
+                        .HasColumnType("text")
+                        .HasColumnName("capture_digest");
+
+                    b.Property<string>("CaptureSnapshot")
+                        .HasColumnType("text")
+                        .HasColumnName("capture_snapshot");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("EnabledAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("enabled_at");
+
+                    b.Property<string>("OperationLabel")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("operation_label");
+
+                    b.Property<Guid?>("OriginBootstrapId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("origin_bootstrap_id");
+
+                    b.Property<DateTimeOffset?>("OriginCapturedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("origin_captured_at");
+
+                    b.Property<long?>("OriginMemberCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("origin_member_count");
+
+                    b.Property<long>("PayloadDivergences")
+                        .HasColumnType("bigint")
+                        .HasColumnName("payload_divergences");
+
+                    b.Property<Guid>("ProjectionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("projection_id");
+
+                    b.Property<DateTimeOffset?>("PromotedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("promoted_at");
+
+                    b.Property<DateTimeOffset?>("ReconciledAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reconciled_at");
+
+                    b.Property<DateTimeOffset?>("ReplayCompletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("replay_completed_at");
+
+                    b.Property<DateTimeOffset?>("SealedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("sealed_at");
+
+                    b.Property<string>("SourceDatabase")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("source_database");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("state");
+
+                    b.HasKey("Id")
+                        .HasName("pk_rebuild_operation");
+
+                    b.ToTable("rebuild_operation", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_rebuild_operation_single_row", "id = 1");
+
+                            t.HasCheckConstraint("ck_rebuild_operation_state", "state IN ('prepared', 'captured', 'replayed', 'reconciled', 'enabled', 'promoted', 'cancelled')");
+                        });
+                });
 #pragma warning restore 612, 618
         }
     }

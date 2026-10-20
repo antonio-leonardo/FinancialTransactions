@@ -5,6 +5,9 @@ namespace FinancialTransactions.Consolidation;
 /// <summary>Identidade de uma captura: o que a origem e o destino precisam concordar.</summary>
 public sealed record BootstrapDescriptor(Guid BootstrapId, long MemberCount);
 
+/// <summary>Identidade e estado da operação de reconstrução de um destino.</summary>
+public sealed record RebuildGuardRow(Guid ProjectionId, string State);
+
 /// <summary>Registro de controle da captura, na origem (<c>consolidation_bootstrap_capture</c>).</summary>
 public sealed record CaptureRow(Guid BootstrapId, long MemberCount, DateTimeOffset CapturedAt, string Snapshot)
 {
@@ -80,6 +83,23 @@ public static class BootstrapStore
         }
 
         return await ReadStateAsync(projection, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Identidade e estado da reconstrução que gerou este destino (nulo se o destino não veio de uma reconstrução).</summary>
+    public static async Task<RebuildGuardRow?> ReadRebuildGuardAsync(NpgsqlConnection projection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(projection);
+        await using var command = new NpgsqlCommand("SELECT projection_id, state FROM rebuild_operation WHERE id = 1", projection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? new RebuildGuardRow(reader.GetGuid(0), reader.GetString(1)) : null;
+    }
+
+    /// <summary>Projeção ativa registrada na origem depois de uma promoção (nulo: nenhuma promoção aconteceu, nada foi substituído).</summary>
+    public static async Task<Guid?> ReadRegistryAsync(NpgsqlConnection origin, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(origin);
+        await using var command = new NpgsqlCommand("SELECT active_projection_id FROM consolidation_projection_registry WHERE id = 1", origin);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is Guid id ? id : null;
     }
 
     public static async Task<NpgsqlConnection> OpenAsync(string connectionString, CancellationToken cancellationToken)

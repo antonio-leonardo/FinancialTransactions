@@ -1,0 +1,401 @@
+using System.Net;
+using FinancialTransactions.Consolidation;
+using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
+using Xunit.Abstractions;
+
+namespace FinancialTransactions.IntegrationTests;
+
+/// <summary>Pontos de pausa e de falha da reconstrução, programáveis por teste.</summary>
+public sealed class ScriptedRebuildPoints : IRebuildFailurePoints
+{
+    public Func<CancellationToken, Task>? OnSnapshot { get; set; }
+
+    public Func<CancellationToken, Task>? AfterCopy { get; set; }
+
+    public Func<CancellationToken, Task>? AfterSeal { get; set; }
+
+    public Func<long, CancellationToken, Task>? AfterReplayItem { get; set; }
+
+    public async ValueTask AfterSnapshotEstablishedAsync(CancellationToken cancellationToken)
+    {
+        if (OnSnapshot is { } hook)
+        {
+            await hook(cancellationToken);
+        }
+    }
+
+    public async ValueTask AfterCaptureCopyBeforeSealAsync(CancellationToken cancellationToken)
+    {
+        if (AfterCopy is { } hook)
+        {
+            await hook(cancellationToken);
+        }
+    }
+
+    public async ValueTask AfterSealCommitAsync(CancellationToken cancellationToken)
+    {
+        if (AfterSeal is { } hook)
+        {
+            await hook(cancellationToken);
+        }
+    }
+
+    public async ValueTask AfterReplayItemAsync(long appliedInThisRun, CancellationToken cancellationToken)
+    {
+        if (AfterReplayItem is { } hook)
+        {
+            await hook(appliedInThisRun, cancellationToken);
+        }
+    }
+}
+
+/// <summary>R10 a R13: reconstrução em banco novo paralelo (captura selada, replay idempotente, reconciliação de R, habilitação e promoção).</summary>
+public sealed class ConsolidationRebuildTests(ITestOutputHelper output)
+{
+    private static RebuildRequest Request(string operation, RebuildTarget target, ConsolidationRig? rig = null) => new(operation, target.Database, rig?.ProjectionDatabase);
+
+    private static async Task<T> TargetScalarAsync<T>(RebuildTarget target, string sql)
+    {
+        await using var connection = new NpgsqlConnection(target.Connection);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        var result = await command.ExecuteScalarAsync();
+        return result is T typed ? typed : (T)Convert.ChangeType(result!, typeof(T), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<HashSet<Guid>> TargetGuidsAsync(RebuildTarget target, string sql)
+    {
+        await using var connection = new NpgsqlConnection(target.Connection);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        var set = new HashSet<Guid>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            set.Add(reader.GetGuid(0));
+        }
+
+        return set;
+    }
+
+    private static Task<string> StateAsync(RebuildTarget target) => TargetScalarAsync<string>(target, "SELECT state FROM rebuild_operation WHERE id = 1");
+
+    private static async Task RunToEnabledAsync(RebuildCoordinator rebuild, RebuildRequest request)
+    {
+        Assert.Equal(AdminExitCodes.Success, (await rebuild.CaptureAsync(request, CancellationToken.None)).ExitCode);
+        Assert.Equal(AdminExitCodes.Success, (await rebuild.ReplayAsync(request, CancellationToken.None)).ExitCode);
+        var reconciled = await rebuild.ReconcileAsync(request, CancellationToken.None);
+        Assert.True(reconciled.ExitCode == AdminExitCodes.Success, System.Text.Json.JsonSerializer.Serialize(reconciled.Body, AdminJson.Options));
+        Assert.Equal(AdminExitCodes.Success, (await rebuild.EnableAsync(request, CancellationToken.None)).ExitCode);
+    }
+
+    private static string BodyOf(RebuildOutcome outcome) => System.Text.Json.JsonSerializer.Serialize(outcome.Body, AdminJson.Options);
+
+    [Fact(DisplayName = "R10a_CaptureInterruptedBeforeTheSealCommit_NoSealedSet_RecaptureDeclaredAsNew")]
+    public async Task R10aCaptureInterruptedBeforeTheSealCommitNoSealedSetRecaptureDeclaredAsNew()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r10a", target);
+        var points = new ScriptedRebuildPoints { AfterCopy = _ => throw new InvalidOperationException("queda antes do commit da selagem") };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Rebuilder(target, points).CaptureAsync(request, CancellationToken.None));
+
+        Assert.Equal(RebuildStates.Prepared, await StateAsync(target)); // não existe conjunto concluído
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item")); // a cópia estava na transação que não confirmou
+        Assert.Null(await TargetScalarAsync<string?>(target, "SELECT capture_digest FROM rebuild_operation WHERE id = 1") is { Length: > 0 } digest ? digest : null);
+
+        var retry = await rig.Rebuilder(target).CaptureAsync(request, CancellationToken.None); // nova captura, em visão nova
+        Assert.Equal(AdminExitCodes.Success, retry.ExitCode);
+        Assert.Equal(RebuildStates.Captured, await StateAsync(target));
+        Assert.Equal(RebuildSeed.Plan.Length, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item"));
+        output.WriteLine($"R10a depois da recaptura: {BodyOf(retry)}");
+    }
+
+    [Fact(DisplayName = "R10b_CaptureInterruptedAfterTheSealCommit_RerunResumesTheSameSet_NeverReplacesIt")]
+    public async Task R10bCaptureInterruptedAfterTheSealCommitRerunResumesTheSameSetNeverReplacesIt()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        var at = await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r10b", target);
+        var points = new ScriptedRebuildPoints { AfterSeal = _ => throw new InvalidOperationException("queda depois do commit") };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Rebuilder(target, points).CaptureAsync(request, CancellationToken.None));
+
+        Assert.Equal(RebuildStates.Captured, await StateAsync(target));
+        var digest = await TargetScalarAsync<string>(target, "SELECT capture_digest FROM rebuild_operation WHERE id = 1");
+        var snapshot = await TargetScalarAsync<string>(target, "SELECT capture_snapshot FROM rebuild_operation WHERE id = 1");
+        var items = await TargetGuidsAsync(target, "SELECT event_id FROM rebuild_capture_item");
+        Assert.Equal(RebuildSeed.Plan.Length, items.Count);
+
+        // Novo movimento depois da selagem: a origem agora tem um a mais, mas R não muda.
+        var later = await rig.PostOkAsync(RebuildSeed.CustomerA, RebuildSeed.A1, "Credit", 1.00m, at);
+        var resumed = await rig.Rebuilder(target).CaptureAsync(request, CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Success, resumed.ExitCode);
+        Assert.Contains("\"resumed\": true", BodyOf(resumed), StringComparison.Ordinal);
+        Assert.Equal(digest, await TargetScalarAsync<string>(target, "SELECT capture_digest FROM rebuild_operation WHERE id = 1"));
+        Assert.Equal(snapshot, await TargetScalarAsync<string>(target, "SELECT capture_snapshot FROM rebuild_operation WHERE id = 1"));
+        Assert.Equal(items, await TargetGuidsAsync(target, "SELECT event_id FROM rebuild_capture_item"));
+        Assert.DoesNotContain(later, items);
+    }
+
+    [Fact(DisplayName = "R10c_EmptySet_IsCapturedSealedReplayedAndReconciled")]
+    public async Task R10cEmptySetIsCapturedSealedReplayedAndReconciled()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await rig.BringToLiveAsync(); // coordenador com conjunto vazio: registro de controle com zero membros
+        NpgsqlConnection.ClearAllPools(); // sessões ociosas do Worker de preparação não contam como consumidores conectados
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r10c", target);
+        var rebuild = rig.Rebuilder(target);
+
+        await RunToEnabledAsync(rebuild, request);
+
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT capture_count FROM rebuild_operation WHERE id = 1"));
+        Assert.Equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", await TargetScalarAsync<string>(target, "SELECT capture_digest FROM rebuild_operation WHERE id = 1")); // SHA-256 do texto vazio
+        Assert.Equal(RebuildStates.Enabled, await StateAsync(target));
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT member_count FROM consolidation_bootstrap WHERE id = 1")); // descritor histórico, não a contagem de R
+    }
+
+    [Fact(DisplayName = "R10d_MassCeilingIsValidatedBeforeTheCopy_AboveItTheCaptureIsRefusedNotTruncated")]
+    public async Task R10dMassCeilingIsValidatedBeforeTheCopyAboveItTheCaptureIsRefusedNotTruncated()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r10d", target);
+
+        var refused = await rig.Rebuilder(target, movementCeiling: RebuildSeed.Plan.Length - 1).CaptureAsync(request, CancellationToken.None);
+
+        Assert.Equal(AdminExitCodes.Conflict, refused.ExitCode);
+        Assert.Contains("excedem o teto declarado", BodyOf(refused), StringComparison.Ordinal);
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_operation")); // nada foi preparado nem copiado
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item"));
+
+        var exact = await rig.Rebuilder(target, movementCeiling: RebuildSeed.Plan.Length).CaptureAsync(request, CancellationToken.None); // no teto exato, captura
+        Assert.Equal(AdminExitCodes.Success, exact.ExitCode);
+    }
+
+    [Fact(DisplayName = "R11a_ReplayFailsAfterACommit_ResumeAppliesOnlyTheRest_NoDuplicates_OriginOutboxUntouched")]
+    public async Task R11aReplayFailsAfterACommitResumeAppliesOnlyTheRestNoDuplicatesOriginOutboxUntouched()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r11a", target);
+        Assert.Equal(AdminExitCodes.Success, (await rig.Rebuilder(target).CaptureAsync(request, CancellationToken.None)).ExitCode);
+        var originBefore = await RebuildSeed.TablesSnapshotAsync(rig);
+
+        var points = new ScriptedRebuildPoints { AfterReplayItem = (applied, _) => applied == 3 ? throw new InvalidOperationException("queda depois do 3.º commit") : Task.CompletedTask };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Rebuilder(target, points).ReplayAsync(request, CancellationToken.None));
+
+        Assert.Equal(3, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events")); // os três commits ficaram
+        var firstThree = await TargetScalarAsync<string>(target, "SELECT string_agg(event_id::text || ':' || xmin::text, ',' ORDER BY event_id) FROM processed_events");
+        Assert.Equal(RebuildStates.Captured, await StateAsync(target)); // o replay não terminou
+
+        var resumed = await rig.Rebuilder(target).ReplayAsync(request, CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Success, resumed.ExitCode);
+        Assert.Contains("\"appliedInThisRun\": 3", BodyOf(resumed), StringComparison.Ordinal); // só o que faltava
+        Assert.Equal(RebuildSeed.Plan.Length, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events"));
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) - COUNT(DISTINCT event_id) FROM processed_events"));
+        foreach (var pair in firstThree.Split(','))
+        {
+            Assert.Contains(pair, await TargetScalarAsync<string>(target, "SELECT string_agg(event_id::text || ':' || xmin::text, ',') FROM processed_events"), StringComparison.Ordinal); // não reaplicados
+        }
+
+        Assert.Equal(AdminExitCodes.Success, (await rig.Rebuilder(target).ReconcileAsync(request, CancellationToken.None)).ExitCode);
+        Assert.Equal(originBefore, await RebuildSeed.TablesSnapshotAsync(rig)); // o replay não tocou na origem (status, processed_at, xmin)
+        Assert.True((await rig.Verifier(target.Connection).VerifyAsync(VerifyMode.Rebuild, CancellationToken.None)).Consistent);
+    }
+
+    [Fact(DisplayName = "R11b_ReplayFailsInsideTheItemTransaction_ItemRolledBack_ResumeAppliesItOnce")]
+    public async Task R11bReplayFailsInsideTheItemTransactionItemRolledBackResumeAppliesItOnce()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r11b", target);
+        Assert.Equal(AdminExitCodes.Success, (await rig.Rebuilder(target).CaptureAsync(request, CancellationToken.None)).ExitCode);
+
+        var applier = new TestConsolidationFailurePoints();
+        applier.InsideProjectionTransactionOnce(_ => throw new InvalidOperationException("queda dentro da transação do item"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Rebuilder(target, applierPoints: applier).ReplayAsync(request, CancellationToken.None));
+
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events")); // marcador e agregado vivem ou morrem juntos
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM daily_account_consolidation"));
+
+        Assert.Equal(AdminExitCodes.Success, (await rig.Rebuilder(target).ReplayAsync(request, CancellationToken.None)).ExitCode);
+        Assert.Equal(RebuildSeed.Plan.Length, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events"));
+        Assert.Equal(AdminExitCodes.Success, (await rig.Rebuilder(target).ReconcileAsync(request, CancellationToken.None)).ExitCode);
+    }
+
+    [Fact(DisplayName = "R12_RebuildWithConfirmedPendingAndLateEvents_PostsAcceptedDuringCaptureAndReplay_RStable_LaterEventsArriveAfterPromotion")]
+    public async Task R12RebuildWithConfirmedPendingAndLateEventsPostsAcceptedDuringCaptureAndReplayRStableLaterEventsArriveAfterPromotion()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        var at = await RebuildSeed.ConvergeAsync(rig);
+
+        // Informação tardia e eventos que ainda estão pendentes na origem (nenhum consumidor rodando): entram em R, mas continuam status 0.
+        var lateInformation = await rig.PostOkAsync(RebuildSeed.CustomerA, RebuildSeed.A1, "Credit", 6.00m, at.AddDays(-5));
+        var pendingInR = await rig.PostOkAsync(RebuildSeed.CustomerA, RebuildSeed.A2, "Debit", 2.00m, at);
+        Assert.Equal(2, await rig.OutboxCountAsync(0));
+
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r12", target, rig);
+        var gate = new Gate();
+        var points = new ScriptedRebuildPoints { OnSnapshot = ct => gate.PassAsync(ct).AsTask() };
+        var rebuild = rig.Rebuilder(target, points);
+
+        var capture = Task.Run(() => rebuild.CaptureAsync(request, CancellationToken.None));
+        await gate.Reached.WaitAsync(TimeSpan.FromSeconds(30));
+        var expectedR = (await rig.OriginGuidsAsync("SELECT id FROM movements")).ToHashSet();
+        var duringCapture = await rig.PostOkAsync(RebuildSeed.CustomerA, RebuildSeed.A1, "Credit", 1.50m, at); // lançamento continua sendo aceito
+        gate.Release();
+        Assert.Equal(AdminExitCodes.Success, (await capture).ExitCode);
+
+        var r = await TargetGuidsAsync(target, "SELECT event_id FROM rebuild_capture_item");
+        Assert.Equal(expectedR, r); // R estável: exatamente o que era visível no snapshot
+        Assert.DoesNotContain(duringCapture, r);
+        Assert.Contains(lateInformation, r);
+        Assert.Contains(pendingInR, r);
+
+        // Replay com POST no meio: aceito, e fora de R.
+        Guid duringReplay = Guid.Empty;
+        points.AfterReplayItem = async (applied, _) =>
+        {
+            if (applied == 2)
+            {
+                duringReplay = await rig.PostOkAsync(RebuildSeed.CustomerA, RebuildSeed.A2, "Credit", 3.00m, at);
+            }
+        };
+        Assert.Equal(AdminExitCodes.Success, (await rebuild.ReplayAsync(request, CancellationToken.None)).ExitCode);
+        Assert.NotEqual(Guid.Empty, duringReplay);
+        Assert.DoesNotContain(duringReplay, r);
+        Assert.Equal(AdminExitCodes.Success, (await rebuild.ReconcileAsync(request, CancellationToken.None)).ExitCode);
+        Assert.Equal(AdminExitCodes.Success, (await rebuild.EnableAsync(request, CancellationToken.None)).ExitCode);
+
+        // Habilitado e ainda NÃO promovido: um Worker apontado para o destino novo não consome nada.
+        var targetFactory = new TestConnectionFactory(rig.RealWith(target.Connection, ConsolidationApplicationNames.Worker));
+        var early = await rig.StartWorkerAsync(new WorkerStart { Factory = targetFactory });
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        Assert.Equal(r.Count, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events"));
+        Assert.True(early.App.Services.GetRequiredService<ConsolidationHealthState>().Has(DegradedReason.RebuildInProgress));
+        Assert.True(await early.StopAsync(TimeSpan.FromSeconds(10)));
+        await early.DisposeAsync();
+        NpgsqlConnection.ClearAllPools();
+
+        var promoted = await rebuild.PromoteAsync(request, CancellationToken.None);
+        Assert.True(promoted.ExitCode == AdminExitCodes.Success, BodyOf(promoted));
+
+        // Depois da promoção os eventos posteriores a R chegam; os de R ainda pendentes na origem são deduplicados no destino novo.
+        var worker = await rig.StartWorkerAsync(new WorkerStart { Factory = targetFactory });
+        await ConsolidationRig.Eventually(async () => await rig.OutboxCountAsync(0) == 0, "pendentes da origem confirmados pelo Worker do destino novo");
+        var counters = LeaseSupport.CountersOf(worker).Snapshot();
+        output.WriteLine($"R12 contadores do Worker novo: {counters}");
+        Assert.Equal(2, counters.DuplicatesAvoided); // informação tardia e o pendente, ambos já em R
+        Assert.Equal(2, counters.AppliedNew); // durante a captura e durante o replay
+        Assert.Equal(r.Count + 2, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events"));
+        Assert.True((await rig.Verifier(target.Connection).VerifyAsync(VerifyMode.Live, CancellationToken.None)).Consistent);
+        Assert.True(await worker.StopAsync(TimeSpan.FromSeconds(10)));
+        await worker.DisposeAsync();
+        NpgsqlConnection.ClearAllPools();
+        var convergence = await rig.Verifier(target.Connection).VerifyAsync(VerifyMode.Convergence, CancellationToken.None);
+        Assert.True(convergence.Consistent, string.Join("; ", convergence.Deviations.Select(d => d.Kind + ": " + d.Detail)));
+    }
+
+    [Fact(DisplayName = "R13a_WrongTargetOriginAsTargetAndActiveProjection_AreRefused_PromoteBeforeReconcileRefused")]
+    public async Task R13aWrongTargetOriginAsTargetAndActiveProjectionAreRefusedPromoteBeforeReconcileRefused()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var before = await RebuildSeed.TablesSnapshotAsync(rig);
+
+        // Alvo errado: a confirmação não corresponde ao banco configurado.
+        var wrong = await rig.Rebuilder(target).CaptureAsync(new RebuildRequest("op-r13a", rig.ProjectionDatabase), CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Refused, wrong.ExitCode);
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_operation"));
+
+        // Origem como destino.
+        var originAsTarget = rig.Rebuilder(new RebuildTarget(rig.OriginDatabase, rig.OriginConnection));
+        var plan = await originAsTarget.PlanAsync(new RebuildRequest("op-r13a", rig.OriginDatabase), CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Conflict, plan.ExitCode);
+        Assert.Contains("origem não pode ser o destino", BodyOf(plan), StringComparison.Ordinal);
+
+        // Projeção ativa por engano (já tem dados): recusada, nada gravado.
+        var active = rig.Rebuilder(new RebuildTarget(rig.ProjectionDatabase, rig.ProjectionConnection));
+        var activeOutcome = await active.CaptureAsync(new RebuildRequest("op-r13a", rig.ProjectionDatabase), CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Conflict, activeOutcome.ExitCode);
+        Assert.Equal(0, await rig.ProjectionScalarAsync<long>("SELECT COUNT(*) FROM rebuild_operation"));
+        Assert.Equal(before, await RebuildSeed.TablesSnapshotAsync(rig));
+
+        // Promoção antes de reconciliar.
+        var request = Request("op-r13a", target, rig);
+        var rebuild = rig.Rebuilder(target);
+        Assert.Equal(AdminExitCodes.Success, (await rebuild.CaptureAsync(request, CancellationToken.None)).ExitCode);
+        var early = await rebuild.PromoteAsync(request, CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Conflict, early.ExitCode);
+        Assert.Contains("habilitado e reconciliado", BodyOf(early), StringComparison.Ordinal);
+        Assert.Equal(AdminExitCodes.Conflict, (await rebuild.EnableAsync(request, CancellationToken.None)).ExitCode); // nem habilita sem reconciliar
+        Assert.Equal(0, await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM consolidation_projection_registry"));
+    }
+
+    [Fact(DisplayName = "R13b_PromotionRefusedWhileKnownConsumersAreConnected_ThenOldProjectionIsNeitherConsumedNorServed")]
+    public async Task R13bPromotionRefusedWhileKnownConsumersAreConnectedThenOldProjectionIsNeitherConsumedNorServed()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        var at = await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13b", target, rig);
+        var rebuild = rig.Rebuilder(target);
+        await RunToEnabledAsync(rebuild, request);
+
+        // Um Worker antigo ainda conectado à origem e ao banco antigo: a promoção é recusada e nada muda.
+        var oldWorker = await rig.StartWorkerAsync();
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        var refused = await rebuild.PromoteAsync(request, CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Conflict, refused.ExitCode);
+        Assert.Contains("sessão(ões) de Worker/API", BodyOf(refused), StringComparison.Ordinal);
+        Assert.Equal(0, await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM consolidation_projection_registry"));
+        Assert.Equal(RebuildStates.Enabled, await StateAsync(target));
+
+        Assert.True(await oldWorker.StopAsync(TimeSpan.FromSeconds(10)));
+        await oldWorker.DisposeAsync();
+        NpgsqlConnection.ClearAllPools();
+        var promoted = await rebuild.PromoteAsync(request, CancellationToken.None);
+        Assert.True(promoted.ExitCode == AdminExitCodes.Success, BodyOf(promoted));
+        Assert.Contains("NÃO é um retorno seguro", BodyOf(promoted), StringComparison.Ordinal); // sem rollback ingênuo anunciado
+        Assert.Equal(RebuildStates.Promoted, await StateAsync(target));
+        Assert.Equal(1, await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM consolidation_projection_registry"));
+        var repeat = await rebuild.PromoteAsync(request, CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Success, repeat.ExitCode); // idempotente
+
+        // Voltar ao banco antigo trocando a connection string: não consome, e a API recusa servir.
+        var pending = await rig.PostOkAsync(RebuildSeed.CustomerA, RebuildSeed.A1, "Credit", 5.00m, at);
+        var processedBefore = await rig.ProcessedCountAsync();
+        var back = await rig.StartWorkerAsync();
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        Assert.Equal(processedBefore, await rig.ProcessedCountAsync());
+        Assert.Equal((short)0, await rig.OriginScalarAsync<short>("SELECT status FROM consolidation_outbox WHERE event_id = @id", ("id", pending)));
+        Assert.True(back.App.Services.GetRequiredService<ConsolidationHealthState>().Has(DegradedReason.ProjectionSuperseded));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await back.GetAsync("/health/ready")).Status);
+
+        var day = BusinessDay.Of(at);
+        var oldApi = await rig.StartConsolidationApiAsync();
+        var (oldStatus, oldBody) = await oldApi.GetAccountAsync(RebuildSeed.CustomerA, RebuildSeed.A1, day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, oldStatus);
+        Assert.Contains("projection_superseded", oldBody, StringComparison.Ordinal);
+
+        // A projeção reconstruída e promovida é servida e consumida normalmente.
+        var newApi = await rig.StartConsolidationApiAsync(new TestConnectionFactory(rig.RealWith(target.Connection, ConsolidationApplicationNames.Api, 1, 1)));
+        var (newStatus, newBody) = await newApi.GetAccountAsync(RebuildSeed.CustomerA, RebuildSeed.A1, day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(HttpStatusCode.OK, newStatus);
+        var daily = ConsolidationRig.Parse<DailyDto>(newBody);
+        Assert.Equal(10.00m, daily.Credits);
+        Assert.Equal(3.25m, daily.Debits);
+        output.WriteLine($"R13b API antiga: {(int)oldStatus}; API nova: {(int)newStatus}; estado da guarda: superseded");
+    }
+}

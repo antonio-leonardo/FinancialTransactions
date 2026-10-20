@@ -200,6 +200,8 @@ public sealed partial class ConsolidationConsumer(
 
         BootstrapStateRow? state;
         CaptureRow? capture = null;
+        RebuildGuardRow? rebuildGuard = null;
+        Guid? registryActive = null;
         var projectionHasData = false;
         using (var phaseBudget = NewBudget(host))
         {
@@ -207,6 +209,7 @@ public sealed partial class ConsolidationConsumer(
             await using (var projection = await BootstrapStore.OpenAsync(strings.Projection, budget).ConfigureAwait(false))
             {
                 state = await BootstrapStore.ReadStateAsync(projection, budget).ConfigureAwait(false);
+                rebuildGuard = await BootstrapStore.ReadRebuildGuardAsync(projection, budget).ConfigureAwait(false);
                 if (state is null)
                 {
                     projectionHasData = await BootstrapStore.ProjectionHasDataAsync(projection, budget).ConfigureAwait(false);
@@ -217,6 +220,7 @@ public sealed partial class ConsolidationConsumer(
             {
                 await using var origin = await BootstrapStore.OpenAsync(strings.Origin, budget).ConfigureAwait(false);
                 capture = await BootstrapStore.ReadCaptureAsync(origin, budget).ConfigureAwait(false);
+                registryActive = await BootstrapStore.ReadRegistryAsync(origin, budget).ConfigureAwait(false);
             }
         }
 
@@ -253,6 +257,26 @@ public sealed partial class ConsolidationConsumer(
         }
 
         health.Clear(DegradedReason.ControlMismatch);
+
+        // Reconstrução: um destino que não é a projeção ativa registrada na origem (por exemplo, o banco antigo depois de uma promoção) não é
+        // consumido; um destino reconstruído e ainda não promovido também não. Voltar ao banco antigo trocando a connection string não é seguro.
+        if (registryActive is { } active && rebuildGuard?.ProjectionId != active)
+        {
+            health.Set(DegradedReason.ProjectionSuperseded);
+            LogProjectionSuperseded(logger);
+            diagnostics.WaitingForBootstrap();
+            return CycleOutcome.Waiting;
+        }
+
+        health.Clear(DegradedReason.ProjectionSuperseded);
+        if (rebuildGuard is not null && rebuildGuard.State != RebuildStates.Promoted)
+        {
+            health.Set(DegradedReason.RebuildInProgress);
+            diagnostics.WaitingForBootstrap();
+            return CycleOutcome.Waiting;
+        }
+
+        health.Clear(DegradedReason.RebuildInProgress);
 
         return state.Phase == ConsolidationBootstrapState.Live
             ? await ConsumeLiveAsync(host).ConfigureAwait(false)
@@ -509,6 +533,9 @@ public sealed partial class ConsolidationConsumer(
 
     [LoggerMessage(EventId = 6007, Level = LogLevel.Warning, Message = "Posse perdida no evento {Sequence} ({Stage}): a reserva venceu ou passou a outra instância; nada foi sobrescrito.")]
     private static partial void LogLeaseLost(ILogger logger, long sequence, string stage);
+
+    [LoggerMessage(EventId = 6009, Level = LogLevel.Error, Message = "Este destino não é a projeção ativa registrada na origem (reconstrução promovida); nada será consumido.")]
+    private static partial void LogProjectionSuperseded(ILogger logger);
 
     [LoggerMessage(EventId = 6008, Level = LogLevel.Debug, Message = "Não foi possível liberar a reserva do evento {Sequence} ({FailureType}); o vencimento a recupera.")]
     private static partial void LogReleaseFailed(ILogger logger, long sequence, string failureType);

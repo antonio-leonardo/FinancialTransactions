@@ -43,7 +43,12 @@ public static class RequeueReasons
 
 public static class AdminJson
 {
-    public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        // Saída de linha de comando, não HTML: acentos legíveis em vez de XXXX.
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     public static void Write(TextWriter output, object value)
     {

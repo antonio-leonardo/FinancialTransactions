@@ -11,7 +11,7 @@ namespace FinancialTransactions.Consolidation.Worker;
 /// </summary>
 public static class WorkerAdmin
 {
-    public static readonly IReadOnlySet<string> Modes = new HashSet<string>(StringComparer.Ordinal) { "--status", "--list-quarantine", "--requeue" };
+    public static readonly IReadOnlySet<string> Modes = new HashSet<string>(StringComparer.Ordinal) { "--status", "--list-quarantine", "--requeue", "--verify", "--rebuild" };
 
     public static async Task<int> RunAsync(string mode, string[] args, TextWriter output, Action<HostApplicationBuilder>? configure = null, CancellationToken cancellationToken = default)
     {
@@ -23,7 +23,7 @@ public static class WorkerAdmin
             ?? Environments.Production;
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = [], EnvironmentName = environment });
         builder.Configuration.AddEnvironmentVariables("FT__");
-        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 5, commandTimeoutSeconds: 15);
+        builder.Services.AddConsolidationCore(connectTimeoutSeconds: 5, commandTimeoutSeconds: 15, applicationName: ConsolidationApplicationNames.Admin);
         builder.Services.AddSingleton<ConsolidationStatusReader>();
         builder.Services.AddSingleton<QuarantineAdmin>();
         configure?.Invoke(builder);
@@ -67,10 +67,70 @@ public static class WorkerAdmin
                     options.ConfirmDatabase ?? string.Empty);
                 return await host.Services.GetRequiredService<QuarantineAdmin>().RequeueAsync(request, output, cancellationToken).ConfigureAwait(false);
 
+            case "--verify":
+                return await VerifyAsync(host.Services.GetRequiredService<ProjectionVerifier>(), options, output, cancellationToken).ConfigureAwait(false);
+
+            case "--rebuild":
+                return await RebuildAsync(host.Services.GetRequiredService<RebuildCoordinator>(), options, output, cancellationToken).ConfigureAwait(false);
+
             default:
                 AdminJson.Write(output, new { state = "refused", reason = "modo desconhecido" });
                 return AdminExitCodes.Refused;
         }
+    }
+
+    private static async Task<int> VerifyAsync(ProjectionVerifier verifier, Parsed options, TextWriter output, CancellationToken cancellationToken)
+    {
+        var mode = (options.VerifyMode ?? "live") switch
+        {
+            "live" => (VerifyMode?)VerifyMode.Live,
+            "convergence" => VerifyMode.Convergence,
+            "rebuild" => VerifyMode.Rebuild,
+            _ => null,
+        };
+        if (mode is null)
+        {
+            AdminJson.Write(output, new { state = "refused", reason = "--mode deve ser live, convergence ou rebuild" });
+            return AdminExitCodes.Refused;
+        }
+
+        try
+        {
+            var report = await verifier.VerifyAsync(mode.Value, cancellationToken).ConfigureAwait(false);
+            AdminJson.Write(output, report);
+            return report.Consistent ? AdminExitCodes.Success : AdminExitCodes.Conflict;
+        }
+        catch (Exception ex) when (ex is Npgsql.NpgsqlException or TimeoutException or InvalidOperationException or OperationCanceledException)
+        {
+            AdminJson.Write(output, new { state = "unknown", error = FailureClassifier.Sanitize(ex) });
+            return AdminExitCodes.Unreachable;
+        }
+    }
+
+    private static async Task<int> RebuildAsync(RebuildCoordinator coordinator, Parsed options, TextWriter output, CancellationToken cancellationToken)
+    {
+        var stage = options.Stage ?? "plan";
+        var request = new RebuildRequest(options.Operation ?? string.Empty, options.ConfirmTarget ?? string.Empty, options.ConfirmPrevious);
+        if (stage is not ("plan" or "status") && !options.Apply)
+        {
+            AdminJson.Write(output, new { state = "refused", reason = "dry-run é o padrão: estágios que alteram dados exigem --apply (use --stage plan para o plano)" });
+            return AdminExitCodes.Refused;
+        }
+
+        var outcome = stage switch
+        {
+            "plan" => await coordinator.PlanAsync(request, cancellationToken).ConfigureAwait(false),
+            "status" => await coordinator.StatusAsync(cancellationToken).ConfigureAwait(false),
+            "capture" => await coordinator.CaptureAsync(request, cancellationToken).ConfigureAwait(false),
+            "replay" => await coordinator.ReplayAsync(request, cancellationToken).ConfigureAwait(false),
+            "reconcile" => await coordinator.ReconcileAsync(request, cancellationToken).ConfigureAwait(false),
+            "enable" => await coordinator.EnableAsync(request, cancellationToken).ConfigureAwait(false),
+            "promote" => await coordinator.PromoteAsync(request, cancellationToken).ConfigureAwait(false),
+            "cancel" => await coordinator.CancelAsync(request, cancellationToken).ConfigureAwait(false),
+            _ => new RebuildOutcome(AdminExitCodes.Refused, new { state = "refused", reason = "--stage deve ser plan, status, capture, replay, reconcile, enable, promote ou cancel" }),
+        };
+        AdminJson.Write(output, outcome.Body);
+        return outcome.ExitCode;
     }
 
     private sealed record Parsed(
@@ -80,12 +140,16 @@ public static class WorkerAdmin
         bool Apply,
         string? PlanDigest,
         string? ConfirmDatabase,
+        string? Stage,
+        string? VerifyMode,
+        string? ConfirmTarget,
+        string? ConfirmPrevious,
         int Limit,
         string? Error);
 
     private static Parsed Parse(string[] args)
     {
-        string? operation = null, reason = null, plan = null, confirm = null;
+        string? operation = null, reason = null, plan = null, confirm = null, stage = null, verifyMode = null, confirmTarget = null, confirmPrevious = null;
         var events = new List<Guid>();
         var apply = false;
         var limit = 100;
@@ -118,6 +182,18 @@ public static class WorkerAdmin
                 case "--confirm-origin-database":
                     confirm = value;
                     break;
+                case "--stage":
+                    stage = value;
+                    break;
+                case "--mode":
+                    verifyMode = value;
+                    break;
+                case "--confirm-target-database":
+                    confirmTarget = value;
+                    break;
+                case "--confirm-previous-database":
+                    confirmPrevious = value;
+                    break;
                 case "--limit":
                     if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out limit))
                     {
@@ -143,8 +219,8 @@ public static class WorkerAdmin
             }
         }
 
-        return new Parsed(operation, events, reason, apply, plan, confirm, limit, null);
+        return new Parsed(operation, events, reason, apply, plan, confirm, stage, verifyMode, confirmTarget, confirmPrevious, limit, null);
     }
 
-    private static Parsed Fail(string error) => new(null, [], null, false, null, null, 100, error);
+    private static Parsed Fail(string error) => new(null, [], null, false, null, null, null, null, null, null, 100, error);
 }

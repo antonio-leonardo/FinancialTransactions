@@ -21,6 +21,12 @@ public enum DegradedReason
 
     /// <summary>Última falha do consumidor de classe ambiente, ainda não desarmada.</summary>
     EnvironmentFailure,
+
+    /// <summary>O destino não é a projeção ativa registrada na origem depois de uma promoção (por exemplo, o banco antigo): nada é consumido.</summary>
+    ProjectionSuperseded,
+
+    /// <summary>O destino é de uma reconstrução ainda não promovida: nada é consumido até a promoção.</summary>
+    RebuildInProgress,
 }
 
 /// <summary>

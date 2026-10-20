@@ -53,6 +53,8 @@ public sealed class ConsolidationDbContext(DbContextOptions<ConsolidationDbConte
     public DbSet<DailyAccountConsolidation> DailyAccountConsolidations => Set<DailyAccountConsolidation>();
     public DbSet<ProcessedEvent> ProcessedEvents => Set<ProcessedEvent>();
     public DbSet<ConsolidationBootstrapState> BootstrapStates => Set<ConsolidationBootstrapState>();
+    public DbSet<RebuildOperation> RebuildOperations => Set<RebuildOperation>();
+    public DbSet<RebuildCaptureItem> RebuildCaptureItems => Set<RebuildCaptureItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -60,6 +62,8 @@ public sealed class ConsolidationDbContext(DbContextOptions<ConsolidationDbConte
         modelBuilder.ApplyConfiguration(new DailyConfiguration());
         modelBuilder.ApplyConfiguration(new ProcessedEventConfiguration());
         modelBuilder.ApplyConfiguration(new BootstrapStateConfiguration());
+        modelBuilder.ApplyConfiguration(new RebuildOperationConfiguration());
+        modelBuilder.ApplyConfiguration(new RebuildCaptureItemConfiguration());
     }
 
     private sealed class DailyConfiguration : IEntityTypeConfiguration<DailyAccountConsolidation>
