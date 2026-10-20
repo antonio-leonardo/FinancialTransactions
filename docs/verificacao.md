@@ -515,3 +515,32 @@ A CI não executou nada disto. As duas instâncias rodam na mesma máquina e no 
 ### 11.3 Limites
 
 Mesmo host, mesmo par de bancos: demonstra mecanismos, não alta disponibilidade. A reconstrução exige consumidores e APIs conhecidos parados, mantém um snapshot longo na origem e copia R em uma única transação do destino; o maior volume exercitado foi de 55 movimentos, e a escala de 100.000 **não foi medida**. O controle de consumidores só enxerga processos que se identificam pelo nome de aplicação. O resultado desconhecido do commit da selagem é tratado por releitura, mas só a falha injetada antes e depois do commit foi exercitada. Os cinco itens do README (ensaio de carga etc.) não foram atendidos por esta parte. A migration `AddProjectionRegistry` (origem) e a `AddRebuildRecovery` (projeção) não foram aplicadas nos bancos de desenvolvimento.
+
+## 12. Ciclo P08, parte B complementar: exclusividade administrativa, promoção parcial e teto
+
+**Estado:** implementado e **executado pelo executor** (execução local, 20/10/2026), aguardando auditoria independente. Parte da referência publicada `93f7698` (parte B). Não é parecer independente nem execução da CI sobre estas alterações; a parte C **não** foi executada e o requisito dos 50 req/s com no máximo 5% de perda segue obrigatório e sem medição. A execução 13 da CI (id `39443000111`, `completed/success`, SHA `93f7698`) é **histórica** da parte B publicada; foi consultada na API pública do GitHub em 20/10/2026 e não cobre esta correção. Comportamento e limites: [recuperacao.md](recuperacao.md) e o adendo da ADR-15.
+
+### 12.1 Controles
+
+| ID | Consequência exposta antes da correção (Red) | Teste |
+|---|---|---|
+| P08B-01 | Duas capturas com identidades diferentes: a segunda selava a operação preparada pela primeira e respondia sucesso; cancelamento aceito no meio do replay e durante a promoção | `R13c`, `R13d`, `R13e` |
+| P08B-02 | Cancelar um destino `enabled` cuja promoção já estava registrada na origem; origem ilegível não impedia o cancelamento; zero linhas na marca local ainda anunciava `promoted=true` | `R13f`, `R13g`, `R13h` |
+| P08B-03 | Um lançamento confirmado entre o preflight e o snapshot fazia a captura exceder o teto e selar | `R10e` |
+
+Os sete casos foram escritos primeiro, com pontos de sincronização nomeados (instrumentação sem mudança de comportamento) e **sem dormir como condição de prontidão**: o teste espera o sinal de que o comando alcançou o ponto. No código anterior os sete reprovaram pela causa pretendida (sete falhos de sete; saídas em `retomada-04\parte-B-complementar\red`); depois da correção os sete passaram. Natureza: banco PostgreSQL real descartável e coordenadores reais num mesmo processo de teste (as sessões e o lock são de verdade); `R13h` usa SQL direto declarado para provocar o zero de linhas. Os pontos de falha existem apenas nos hosts de teste (`IRebuildFailurePoints`, padrão sem efeito).
+
+### 12.2 Comandos e resultados (fonte: executor)
+
+- Restore `rc=0`; build Release `-warnaserror` `rc=0`, 0 avisos, 11 assemblies.
+- Duas rodadas completas: unidade **199/199** e integração **143/143** em ambas (quatro execuções com identificadores distintos), 342 nomes idênticos entre as rodadas; os **335** da referência publicada todos presentes; **7 novos** (`R10e`, `R13c` a `R13h`). Nenhum caso foi alterado ou removido.
+- Sondagem complementar com processos reais (9 passos, 0 falhos, 0 vazamentos, containers com os mesmos identificadores e saudáveis, bancos `ft_p08_*` removidos): comando real de captura recusado (saída 4, nada preparado) enquanto uma sessão SQL segura a exclusividade do alvo (simulação do concorrente); captura de 12 movimentos, replay, reconciliação e habilitação; cancelamento recusado (saída 4) com o registro da origem já confirmado (criado por SQL, declarado); retomada do `promote` completa a marca sem alterar a geração do registro; repetição idempotente; `--verify` viva e de reconstrução consistentes; Worker no banco antigo permanece em `ProjectionSuperseded`. Não repete a sondagem de 17 passos da parte B.
+- Mutações dirigidas em cópia descartável, cada uma com positivo antes: chaves de exclusividade diferentes por comando (R13c, R13d e R13e reprovam), cancelamento ignorando o registro da origem (R13f), promoção sem conferir linha e estado (R13h), teto não revalidado no snapshot (R10e), cancelamento sem ler a origem (R13g). A primeira tentativa da mutação do R13h foi invalidada por erro de compilação (código inalcançável) e foi repetida.
+
+### 12.3 Disposição e limites
+
+- **P08B-01, P08B-02, P08B-03:** corrigidos e testados como acima. A exclusividade é um lock consultivo de sessão no banco de destino: coordena comandos deste coordenador entre processos, não impede SQL direto nem outros programas, e depende de o destino aceitar conexão. A concorrência real entre dois coordenadores foi exercitada por testes (processo único, sessões distintas); com processos separados só o concorrente simulado por SQL.
+- **Promoção parcial:** a decisão é por releitura do registro da origem, sem estado novo nem migration. O resultado desconhecido do commit do registro continua tratado por releitura; não há transação distribuída, rollback transparente nem retorno ao banco antigo. A redundância das verificações de identidade (rótulo conferido de novo na preparação e sob `FOR UPDATE`) não tem mutação própria porque a exclusividade as cobre antes.
+- **P08B-04 (documentação apenas):** a verificação de sessões exige acesso ao banco anterior, resolvido no servidor configurado para o destino; recuperação de banco ou servidor definitivamente perdido **não está demonstrada**. Nada foi implementado para isso.
+- **P08B-05:** ver o adendo de procedência do checkpoint complementar. Nesta rodada não houve `git add`, nem `-N`, nem `git reset`.
+- Continuam valendo os limites da parte B: escala de 100.000 movimentos não medida (teto de 250.000, revalidado no snapshot), controle de consumidores por nome de aplicação, dois processos num host não são alta disponibilidade, e as migrations `AddProjectionRegistry` e `AddRebuildRecovery` não foram aplicadas nos bancos de desenvolvimento (esta rodada não criou migration).

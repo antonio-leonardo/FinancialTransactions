@@ -276,6 +276,15 @@ public sealed class ConsolidationRig : IAsyncDisposable
         return new RebuildCoordinator(factory, new ProjectionVerifier(factory), points ?? new NoRebuildFailurePoints(), applierPoints ?? new NoConsolidationFailurePoints(), TimeProvider.System, NullLogger<RebuildCoordinator>.Instance, movementCeiling ?? RebuildCoordinator.DefaultMovementCeiling);
     }
 
+    /// <summary>Coordenador cuja ORIGEM é outra connection string (por exemplo, inalcançável); o destino é o banco reconstruído.</summary>
+    public static RebuildCoordinator RebuilderWithOrigin(RebuildTarget target, string originConnection, IRebuildFailurePoints? points = null)
+    {
+        var factory = new TestConnectionFactory(new ConsolidationConnectionStrings(
+            WithApp(new NpgsqlConnectionStringBuilder(originConnection), ConsolidationApplicationNames.Admin),
+            WithApp(new NpgsqlConnectionStringBuilder(target.Connection), ConsolidationApplicationNames.Admin)));
+        return new RebuildCoordinator(factory, new ProjectionVerifier(factory), points ?? new NoRebuildFailurePoints(), new NoConsolidationFailurePoints(), TimeProvider.System, NullLogger<RebuildCoordinator>.Instance);
+    }
+
     // ---------- hosts ----------
 
     public async Task<WorkerHandle> StartWorkerAsync(WorkerStart? start = null)

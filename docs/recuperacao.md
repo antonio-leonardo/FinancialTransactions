@@ -41,7 +41,8 @@ Diferenças de fuso entre ambientes são classificadas, não escondidas: o .NET 
 - O **banco de destino é novo**, migrado (`AddRebuildRecovery`) e vazio. Ele é o que a connection string de projeção aponta, e o comando exige `--confirm-target-database <nome>` igual a esse banco. A origem nunca pode ser o destino, e um destino que já tem dados de uma projeção ativa é recusado.
 - A origem tem o registro de controle do bootstrap (o coordenador `--backfill` já rodou) e a migration `AddProjectionRegistry`.
 - **Todos os Workers e APIs do consolidado conhecidos estão parados** e as reservas venceram. O comando verifica, em `pg_stat_activity`, que não há sessão com `Application Name` `ft-consolidation-worker*` ou `ft-consolidation-api*` na origem nem no destino, e que não há reserva válida. Processos que não se identificam não são vistos por esse controle: é a restrição operacional que o comando não esconde.
-- O número de movimentos não excede o teto declarado desta versão (250.000), verificado **antes** da cópia; acima dele a captura é recusada, não truncada.
+- O número de movimentos não excede o teto declarado desta versão (250.000), verificado no preflight **e de novo dentro do snapshot que será enumerado**, antes da cópia; acima dele a captura é recusada, não truncada, e nada é selado. Um lançamento confirmado entre o preflight e o snapshot é aceito normalmente; se ele fizer a visão exceder o teto, é a captura que é recusada.
+- **O banco anterior precisa aceitar conexão.** Para provar que não há Worker nem API conectados, a promoção abre uma conexão com o banco anterior (`--confirm-previous-database`), no **mesmo servidor, porta e credenciais** configurados para o destino novo. Se ele não existir ou não responder, a promoção é recusada (a falha de conexão nunca vale "zero sessões"). O que esta versão demonstra é a reconstrução com o banco anterior acessível; **a recuperação de um banco ou servidor definitivamente perdido não está demonstrada** e exigiria um procedimento próprio (por exemplo, verificar a ausência pela instância administrativa), ainda não implementado.
 
 ### Estágios
 
@@ -68,6 +69,8 @@ dotnet <Worker.dll> --rebuild --stage cancel    --operation op-2026-10-20 --conf
 
 **Retomada.** Cada estágio é repetível. Se a execução cai antes do commit da selagem, não existe conjunto concluído e a repetição captura de novo, em visão nova (declarado como nova tentativa). Se cai depois, a repetição encontra o conjunto selado e **retoma exatamente o mesmo R**: nunca o substitui nem mistura duas capturas, mesmo que a origem tenha ganhado movimentos. Se o resultado do commit é desconhecido, a operação é relida antes de decidir (saída `5` quando nada foi selado).
 
+**Exclusividade por destino.** Todo estágio que altera a operação (`capture`, `replay`, `reconcile`, `enable`, `cancel`, `promote`) adquire, antes de ler a operação, um lock consultivo de sessão no banco de destino, numa conexão dedicada que dura o comando inteiro. Funciona entre processos distintos; não é um lock em memória e não toca linhas financeiras nem a Outbox, de modo que os lançamentos nunca esperam por ele. Se outro comando já o detém, o comando recusa na hora (saída `4`, "exclusividade por alvo") sem esperar e sem alterar nada; quem recebeu "ocupado" nunca libera o lock alheio. Só depois de adquirir a exclusividade o comando relê a identidade (rótulo da operação, origem) e o estado: uma preparação ignorada por conflito não autoriza capturar para outra identidade. Antes dos pontos de escrita decisivos (selagem, cancelamento, registro e marca da promoção) o comando confere que a sua sessão ainda é a dona; conexão perdida encerra a exclusividade. `status` e `--verify` são somente leitura e não participam. A exclusividade só vale entre comandos deste coordenador; outros processos, ou SQL direto, não a respeitam.
+
 **Lançamentos.** A API de lançamentos continua aceitando durante a captura e o replay. Os movimentos posteriores ao snapshot ficam na Outbox, fora de R, e chegam ao destino novo depois da promoção; os itens de R ainda pendentes na origem são **deduplicados** no destino novo (marcador) antes da confirmação.
 
 ### Promoção
@@ -75,6 +78,16 @@ dotnet <Worker.dll> --rebuild --stage cancel    --operation op-2026-10-20 --conf
 A promoção só ocorre se: o destino está `enabled`; a reconciliação de R continua verdadeira; **nenhuma** sessão de Worker ou API do consolidado está conectada à origem, ao destino novo ou ao banco anterior (`--confirm-previous-database`); não há reserva válida; e **todo evento já confirmado na origem está coberto por R** (nenhum consumidor confirmou trabalho depois da captura). Do contrário recusa (saída `4`) e não altera nada.
 
 Aceita, ela registra na origem (`consolidation_projection_registry`) qual identidade de projeção é a ativa e marca o destino como `promoted`. Depois disso o operador sobe as **APIs e os Workers novos apontando só para o banco reconstruído** (nunca altere as strings globais nem as de desenvolvimento para o ensaio).
+
+### Promoção parcial, cancelamento e retomada
+
+A promoção confirma o registro da projeção ativa **na origem** e só depois marca `promoted` **no destino**: dois bancos, dois commits, sem transação distribuída. Uma queda entre eles deixa a origem apontando para a projeção nova com o destino ainda `enabled`. Regras desta versão:
+
+- **Cancelar um destino `enabled` exige ler a origem.** Se o registro da origem já aponta para esta projeção, o cancelamento é **recusado** (`cancel` não desfaz a troca); se a origem não puder ser lida, o resultado é desconhecido (saída `2`) e **nada é cancelado**. Só com a origem legível e sem registro para esta projeção o cancelamento é aceito.
+- **Retomar completa a mesma operação.** Repetir `promote` com o registro já apontando para esta projeção e o destino `enabled` só completa a marca local, sem regravar o registro (a geração não muda) e sem repetir as verificações de consumidores: as guardas deixam Workers e APIs desta projeção em espera (`RebuildInProgress`) até a marca. O banco anterior continua bloqueado (`ProjectionSuperseded`).
+- **O registro da origem não é sobrescrito em silêncio.** A gravação é condicionada à geração lida; se o registro mudou desde a leitura e não é desta projeção, a promoção recusa sem alterar a origem.
+- **Sucesso só depois de conferir.** Após a marca local o comando relê o destino e a origem: linhas afetadas zero, ou estado diferente de `promoted`, ou registro diferente, devolvem conflito com `promoted=false` e `partial=true`, nunca sucesso. Não se presume rollback.
+- Não há transação distribuída nem retorno transparente: uma intervenção por SQL direto no destino entre os dois commits (declarada no teste `R13h`) é detectada e relatada, não corrigida.
 
 ### Depois da promoção, e o retorno
 
@@ -88,6 +101,7 @@ Esta fatia **conserva** movimentos, Outbox, marcadores e o conjunto de captura. 
 
 ## 4. Custos e limites conhecidos
 
+- A exclusividade é um lock consultivo no banco de destino: depende de o destino aceitar conexão e só coordena comandos deste coordenador.
 - A captura mantém **um snapshot longo** na origem enquanto copia R, e grava R numa **única transação** do destino. O teto desta versão é de 250.000 movimentos; o maior volume exercitado nesta parte foi pequeno (dezenas de movimentos), de modo que a **escala de 100.000 movimentos não foi medida aqui** (é objeto da parte C).
 - O controle de consumidores é por nome de aplicação nas sessões do PostgreSQL. É um controle comprovável, não onisciente.
 - Duas instâncias e um único host demonstram os mecanismos; não são alta disponibilidade de produção.

@@ -21,6 +21,25 @@ public interface IRebuildFailurePoints
 
     /// <summary>Item de R aplicado e confirmado no destino. <paramref name="appliedInThisRun"/> conta os aplicados nesta execução.</summary>
     ValueTask AfterReplayItemAsync(long appliedInThisRun, CancellationToken cancellationToken);
+
+    /// <summary>Ponto nomeado de sincronização do teste (ver <see cref="RebuildPoints"/>), imediatamente antes da primeira escrita do trecho.</summary>
+    ValueTask ReachedAsync(string point, CancellationToken cancellationToken);
+}
+
+/// <summary>Nomes dos pontos de <see cref="IRebuildFailurePoints.ReachedAsync"/>.</summary>
+public static class RebuildPoints
+{
+    /// <summary>Captura: pré-condições lidas, antes de preparar a operação.</summary>
+    public const string CaptureBeforePrepare = "capture.before-prepare";
+
+    /// <summary>Captura: operação preparada, antes de abrir o snapshot da origem.</summary>
+    public const string CaptureBeforeSnapshot = "capture.before-snapshot";
+
+    /// <summary>Cancelamento: decisão tomada, antes da atualização do estado.</summary>
+    public const string CancelBeforeUpdate = "cancel.before-update";
+
+    /// <summary>Promoção: registro da projeção ativa confirmado na origem, marca local ainda não gravada.</summary>
+    public const string PromoteAfterRegistry = "promote.after-registry";
 }
 
 public sealed class NoRebuildFailurePoints : IRebuildFailurePoints
@@ -32,6 +51,8 @@ public sealed class NoRebuildFailurePoints : IRebuildFailurePoints
     public ValueTask AfterSealCommitAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 
     public ValueTask AfterReplayItemAsync(long appliedInThisRun, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+    public ValueTask ReachedAsync(string point, CancellationToken cancellationToken) => ValueTask.CompletedTask;
 }
 
 public sealed record RebuildRequest(string OperationLabel, string ConfirmTargetDatabase, string? ConfirmPreviousDatabase = null);
@@ -151,6 +172,13 @@ public sealed partial class RebuildCoordinator(
         try
         {
             var strings = connections.Open(ConsolidationConnectionRole.Rebuild);
+            await using var lease = await AdminLease.TryAcquireAsync(strings.Projection, logger, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return Busy("capture");
+            }
+
+            // Identidade, origem e estado só são lidos DEPOIS da exclusividade: quem perdeu a disputa não toca a operação alheia.
             var existing = await ReadOperationOrNullAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
             if (existing is not null && !string.Equals(existing.OperationLabel, request.OperationLabel, StringComparison.Ordinal))
             {
@@ -170,8 +198,15 @@ public sealed partial class RebuildCoordinator(
                 return new RebuildOutcome(AdminExitCodes.Conflict, new { stage = "capture", state = existing?.State ?? "absent", refusals });
             }
 
-            await PrepareAsync(strings, request, cancellationToken).ConfigureAwait(false);
-            return await CaptureCoreAsync(strings, request, cancellationToken).ConfigureAwait(false);
+            await failurePoints.ReachedAsync(RebuildPoints.CaptureBeforePrepare, cancellationToken).ConfigureAwait(false);
+            var owner = await PrepareAsync(strings, request, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(owner, request.OperationLabel, StringComparison.Ordinal))
+            {
+                // Um INSERT ignorado por conflito não autoriza a capturar para outra identidade.
+                return Conflict("capture", $"o destino pertence a outra operação de reconstrução ({owner})");
+            }
+
+            return await CaptureCoreAsync(strings, request, lease, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsUnreachable(ex))
         {
@@ -179,7 +214,8 @@ public sealed partial class RebuildCoordinator(
         }
     }
 
-    private static async Task PrepareAsync(ConsolidationConnectionStrings strings, RebuildRequest request, CancellationToken cancellationToken)
+    /// <summary>Prepara a operação (idempotente) e devolve o rótulo que de fato é dono do destino.</summary>
+    private static async Task<string> PrepareAsync(ConsolidationConnectionStrings strings, RebuildRequest request, CancellationToken cancellationToken)
     {
         await using var destination = await BootstrapStore.OpenAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
         await using var insert = new NpgsqlCommand(
@@ -193,10 +229,13 @@ public sealed partial class RebuildCoordinator(
         insert.Parameters.AddWithValue("label", request.OperationLabel);
         insert.Parameters.AddWithValue("source", new NpgsqlConnectionStringBuilder(strings.Origin).Database ?? string.Empty);
         await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return await ScalarAsync<string>(destination, "SELECT operation_label FROM rebuild_operation WHERE id = 1", cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("A operação de reconstrução sumiu depois da preparação.");
     }
 
-    private async Task<RebuildOutcome> CaptureCoreAsync(ConsolidationConnectionStrings strings, RebuildRequest request, CancellationToken cancellationToken)
+    private async Task<RebuildOutcome> CaptureCoreAsync(ConsolidationConnectionStrings strings, RebuildRequest request, AdminLease lease, CancellationToken cancellationToken)
     {
+        await failurePoints.ReachedAsync(RebuildPoints.CaptureBeforeSnapshot, cancellationToken).ConfigureAwait(false);
         await using var origin = await BootstrapStore.OpenAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
         await using var originTx = await origin.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken).ConfigureAwait(false);
         await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", origin, originTx))
@@ -209,6 +248,13 @@ public sealed partial class RebuildCoordinator(
         await using (var snapshotCommand = new NpgsqlCommand("SELECT pg_current_snapshot()::text", origin, originTx))
         {
             snapshot = (string)(await snapshotCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? string.Empty);
+        }
+
+        // O teto é revalidado na MESMA visão que será enumerada (o preflight é só informativo): um lançamento confirmado entre os dois não passa.
+        var inSnapshot = await ScalarAsync<long>(origin, "SELECT COUNT(*) FROM movements", cancellationToken, originTx).ConfigureAwait(false);
+        if (inSnapshot > movementCeiling)
+        {
+            return Conflict("capture", $"{inSnapshot} movimentos na visão da captura excedem o teto declarado de {movementCeiling} desta versão; a captura não será truncada nem selada");
         }
 
         await failurePoints.AfterSnapshotEstablishedAsync(cancellationToken).ConfigureAwait(false);
@@ -243,7 +289,24 @@ public sealed partial class RebuildCoordinator(
 
         await using var destination = await BootstrapStore.OpenAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
         await using var destinationTx = await destination.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
-        var locked = await ScalarAsync<string>(destination, "SELECT state FROM rebuild_operation WHERE id = 1 FOR UPDATE", cancellationToken, destinationTx).ConfigureAwait(false);
+        string locked, lockedLabel;
+        await using (var lockRow = new NpgsqlCommand("SELECT state, operation_label FROM rebuild_operation WHERE id = 1 FOR UPDATE", destination, destinationTx))
+        await using (var lockReader = await lockRow.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!await lockReader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                return Conflict("capture", "a operação de reconstrução sumiu antes da selagem");
+            }
+
+            locked = lockReader.GetString(0);
+            lockedLabel = lockReader.GetString(1);
+        }
+
+        if (!string.Equals(lockedLabel, request.OperationLabel, StringComparison.Ordinal))
+        {
+            return Conflict("capture", $"o destino pertence a outra operação de reconstrução ({lockedLabel})");
+        }
+
         if (locked != RebuildStates.Prepared)
         {
             return new RebuildOutcome(AdminExitCodes.Success, new { stage = "capture", state = locked, note = "outra execução selou a captura; nada a fazer" });
@@ -332,6 +395,12 @@ public sealed partial class RebuildCoordinator(
             }
         }
 
+        if (!await lease.IsStillHeldAsync(cancellationToken).ConfigureAwait(false))
+        {
+            await destinationTx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            return Conflict("capture", "a exclusividade administrativa foi perdida antes da selagem; nada foi selado");
+        }
+
         try
         {
             await destinationTx.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -377,6 +446,12 @@ public sealed partial class RebuildCoordinator(
         try
         {
             var strings = connections.Open(ConsolidationConnectionRole.Rebuild);
+            await using var lease = await AdminLease.TryAcquireAsync(strings.Projection, logger, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return Busy("replay");
+            }
+
             var op = await ReadOperationOrNullAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
             if (op is null || op.OperationLabel != request.OperationLabel)
             {
@@ -477,6 +552,12 @@ public sealed partial class RebuildCoordinator(
         try
         {
             var strings = connections.Open(ConsolidationConnectionRole.Rebuild);
+            await using var lease = await AdminLease.TryAcquireAsync(strings.Projection, logger, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return Busy("reconcile");
+            }
+
             var op = await ReadOperationOrNullAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
             if (op is null || op.OperationLabel != request.OperationLabel)
             {
@@ -519,6 +600,12 @@ public sealed partial class RebuildCoordinator(
         try
         {
             var strings = connections.Open(ConsolidationConnectionRole.Rebuild);
+            await using var lease = await AdminLease.TryAcquireAsync(strings.Projection, logger, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return Busy("enable");
+            }
+
             var op = await ReadOperationOrNullAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
             if (op is null || op.OperationLabel != request.OperationLabel)
             {
@@ -590,6 +677,42 @@ public sealed partial class RebuildCoordinator(
         try
         {
             var strings = connections.Open(ConsolidationConnectionRole.Rebuild);
+            await using var lease = await AdminLease.TryAcquireAsync(strings.Projection, logger, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return Busy("cancel");
+            }
+
+            var current = await ReadOperationOrNullAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
+            if (current is null || !string.Equals(current.OperationLabel, request.OperationLabel, StringComparison.Ordinal))
+            {
+                return Conflict("cancel", "não há reconstrução desta operação neste destino");
+            }
+
+            if (current.State == RebuildStates.Enabled)
+            {
+                // Só um destino habilitado pode já ter sido tornado ativo na origem. Sem ler o registro, não se afirma que a troca não ocorreu.
+                var registry = await ReadRegistryAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
+                if (registry == current.ProjectionId)
+                {
+                    return new RebuildOutcome(
+                        AdminExitCodes.Conflict,
+                        new
+                        {
+                            stage = "cancel",
+                            state = current.State,
+                            cancelled = false,
+                            reason = "a promoção desta operação já foi registrada na origem; cancelar não a desfaz. Repita o estágio promote para completar a marca local",
+                        });
+                }
+            }
+
+            if (!await lease.IsStillHeldAsync(cancellationToken).ConfigureAwait(false))
+            {
+                return Conflict("cancel", "a exclusividade administrativa foi perdida; nada foi cancelado");
+            }
+
+            await failurePoints.ReachedAsync(RebuildPoints.CancelBeforeUpdate, cancellationToken).ConfigureAwait(false);
             await using var destination = await BootstrapStore.OpenAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
             await using var cancel = new NpgsqlCommand(
                 "UPDATE rebuild_operation SET state = 'cancelled', cancelled_at = statement_timestamp() WHERE id = 1 AND operation_label = @label AND state IN ('prepared', 'captured', 'replayed', 'reconciled', 'enabled')",
@@ -598,7 +721,7 @@ public sealed partial class RebuildCoordinator(
             var changed = await cancel.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             var op = await ReadOperationAsync(destination, cancellationToken).ConfigureAwait(false);
             return new RebuildOutcome(
-                changed == 1 ? AdminExitCodes.Success : AdminExitCodes.Conflict,
+                changed == 1 && op?.State == RebuildStates.Cancelled ? AdminExitCodes.Success : AdminExitCodes.Conflict,
                 new { stage = "cancel", state = op?.State ?? "absent", note = "O banco antigo e a origem não foram tocados; nada é apagado." });
         }
         catch (Exception ex) when (IsUnreachable(ex))
@@ -625,6 +748,12 @@ public sealed partial class RebuildCoordinator(
         try
         {
             var strings = connections.Open(ConsolidationConnectionRole.Rebuild);
+            await using var lease = await AdminLease.TryAcquireAsync(strings.Projection, logger, cancellationToken).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return Busy("promote");
+            }
+
             var targetDatabase = new NpgsqlConnectionStringBuilder(strings.Projection).Database ?? string.Empty;
             if (string.Equals(request.ConfirmPreviousDatabase, targetDatabase, StringComparison.Ordinal))
             {
@@ -637,10 +766,18 @@ public sealed partial class RebuildCoordinator(
                 return Conflict("promote", "não há reconstrução desta operação neste destino");
             }
 
-            var registry = await ReadRegistryAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
-            if (op.State == RebuildStates.Promoted && registry == op.ProjectionId)
+            var registry = await ReadRegistryRowAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
+            var originDatabase = new NpgsqlConnectionStringBuilder(strings.Origin).Database ?? string.Empty;
+            if (op.State == RebuildStates.Promoted && registry.ActiveId == op.ProjectionId)
             {
                 return new RebuildOutcome(AdminExitCodes.Success, new { stage = "promote", state = op.State, note = "já promovido; repetição sem efeito" });
+            }
+
+            if (op.State == RebuildStates.Enabled && registry.ActiveId == op.ProjectionId)
+            {
+                // Promoção parcial: o registro na origem foi confirmado e a marca local não. Completa a MESMA operação, sem regravar o registro
+                // e sem rever o que a promoção já decidiu; consumidores desta projeção ficam em espera até a marca (RebuildInProgress).
+                return await MarkPromotedAsync(strings, op, request, originDatabase, resumed: true, lease, cancellationToken).ConfigureAwait(false);
             }
 
             var refusals = new List<string>();
@@ -659,7 +796,6 @@ public sealed partial class RebuildCoordinator(
             }
 
             // Controle comprovado sobre consumidores e APIs: nenhuma sessão de Worker ou API na origem, no destino ou no banco anterior, e nada em voo.
-            var originDb = new NpgsqlConnectionStringBuilder(strings.Origin).Database ?? string.Empty;
             var previous = new NpgsqlConnectionStringBuilder(strings.Projection) { Database = request.ConfirmPreviousDatabase }.ConnectionString;
             foreach (var (label, connectionString) in new[] { ("origem", strings.Origin), ("destino novo", strings.Projection), ("banco anterior", previous) })
             {
@@ -709,51 +845,113 @@ public sealed partial class RebuildCoordinator(
                 return new RebuildOutcome(AdminExitCodes.Conflict, new { stage = "promote", state = op.State, promoted = false, refusals, note = "Nada foi alterado." });
             }
 
-            // Registro na origem primeiro (idempotente por identidade); só então a marca no destino.
+            if (!await lease.IsStillHeldAsync(cancellationToken).ConfigureAwait(false))
+            {
+                return Conflict("promote", "a exclusividade administrativa foi perdida; nada foi alterado");
+            }
+
+            // Registro na origem primeiro, condicionado à geração lida: nunca sobrescreve em silêncio um registro que mudou desde a leitura.
             await using (var origin = await BootstrapStore.OpenAsync(strings.Origin, cancellationToken).ConfigureAwait(false))
-            await using (var upsert = new NpgsqlCommand(
-                """
-                INSERT INTO consolidation_projection_registry AS r (id, active_projection_id, generation, promoted_at, operation_label, previous_database)
-                VALUES (1, @pid, 1, statement_timestamp(), @label, @previous)
-                ON CONFLICT (id) DO UPDATE
-                SET active_projection_id = EXCLUDED.active_projection_id, generation = r.generation + 1, promoted_at = EXCLUDED.promoted_at,
-                    operation_label = EXCLUDED.operation_label, previous_database = EXCLUDED.previous_database
-                WHERE r.active_projection_id <> EXCLUDED.active_projection_id
-                """,
+            await using (var write = new NpgsqlCommand(
+                registry.ActiveId is null
+                    ? """
+                      INSERT INTO consolidation_projection_registry (id, active_projection_id, generation, promoted_at, operation_label, previous_database)
+                      VALUES (1, @pid, 1, statement_timestamp(), @label, @previous)
+                      ON CONFLICT (id) DO NOTHING
+                      """
+                    : """
+                      UPDATE consolidation_projection_registry
+                      SET active_projection_id = @pid, generation = generation + 1, promoted_at = statement_timestamp(),
+                          operation_label = @label, previous_database = @previous
+                      WHERE id = 1 AND generation = @expected AND active_projection_id <> @pid
+                      """,
                 origin))
             {
-                upsert.Parameters.AddWithValue("pid", op.ProjectionId);
-                upsert.Parameters.AddWithValue("label", request.OperationLabel);
-                upsert.Parameters.AddWithValue("previous", request.ConfirmPreviousDatabase);
-                await upsert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            await using (var destination = await BootstrapStore.OpenAsync(strings.Projection, cancellationToken).ConfigureAwait(false))
-            await using (var mark = new NpgsqlCommand(
-                "UPDATE rebuild_operation SET state = 'promoted', promoted_at = statement_timestamp() WHERE id = 1 AND state = 'enabled'",
-                destination))
-            {
-                await mark.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            return new RebuildOutcome(
-                AdminExitCodes.Success,
-                new
+                write.Parameters.AddWithValue("pid", op.ProjectionId);
+                write.Parameters.AddWithValue("label", request.OperationLabel);
+                write.Parameters.AddWithValue("previous", request.ConfirmPreviousDatabase);
+                write.Parameters.AddWithValue("expected", registry.Generation);
+                if (await write.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
                 {
-                    stage = "promote",
-                    state = RebuildStates.Promoted,
-                    promoted = true,
-                    activeProjectionId = op.ProjectionId,
-                    originDatabase = originDb,
-                    previousDatabase = request.ConfirmPreviousDatabase,
-                    note = "Registrado na origem. Suba as APIs e os Workers novos apontando SÓ para o banco reconstruído. Voltar ao banco antigo trocando a connection string NÃO é um retorno seguro: o registro da origem bloqueia o consumo e a leitura de uma projeção que não é a ativa.",
-                });
+                    var reread = await ReadRegistryRowAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
+                    if (reread.ActiveId != op.ProjectionId)
+                    {
+                        return new RebuildOutcome(
+                            AdminExitCodes.Conflict,
+                            new { stage = "promote", state = op.State, promoted = false, reason = "o registro da projeção ativa mudou desde a leitura; nada foi sobrescrito", note = "A origem não foi alterada por esta tentativa." });
+                    }
+                }
+            }
+
+            await failurePoints.ReachedAsync(RebuildPoints.PromoteAfterRegistry, cancellationToken).ConfigureAwait(false);
+            return await MarkPromotedAsync(strings, op, request, originDatabase, resumed: false, lease, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsUnreachable(ex))
         {
             return Unreachable("promote", ex);
         }
     }
+
+    /// <summary>Marca local da promoção. Só devolve sucesso depois de conferir a linha afetada, o estado resultante e o registro da origem.</summary>
+    private static async Task<RebuildOutcome> MarkPromotedAsync(
+        ConsolidationConnectionStrings strings,
+        RebuildOperation op,
+        RebuildRequest request,
+        string originDatabase,
+        bool resumed,
+        AdminLease lease,
+        CancellationToken cancellationToken)
+    {
+        if (!await lease.IsStillHeldAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return PartialPromotion(op.State, "a exclusividade administrativa foi perdida antes da marca local");
+        }
+
+        int changed;
+        await using (var destination = await BootstrapStore.OpenAsync(strings.Projection, cancellationToken).ConfigureAwait(false))
+        await using (var mark = new NpgsqlCommand(
+            "UPDATE rebuild_operation SET state = 'promoted', promoted_at = statement_timestamp() WHERE id = 1 AND state = 'enabled' AND projection_id = @pid",
+            destination))
+        {
+            mark.Parameters.AddWithValue("pid", op.ProjectionId);
+            changed = await mark.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        // Zero linhas não comprova a transição: relê o destino e a origem antes de anunciar qualquer sucesso.
+        var after = await ReadOperationOrNullAsync(strings.Projection, cancellationToken).ConfigureAwait(false);
+        var registry = await ReadRegistryAsync(strings.Origin, cancellationToken).ConfigureAwait(false);
+        if (after?.State != RebuildStates.Promoted || registry != op.ProjectionId)
+        {
+            return PartialPromotion(after?.State ?? op.State, $"a marca local não foi confirmada (linhas afetadas: {changed}; estado atual: {after?.State ?? "ausente"})");
+        }
+
+        return new RebuildOutcome(
+            AdminExitCodes.Success,
+            new
+            {
+                stage = "promote",
+                state = RebuildStates.Promoted,
+                promoted = true,
+                resumed,
+                activeProjectionId = op.ProjectionId,
+                originDatabase,
+                previousDatabase = request.ConfirmPreviousDatabase,
+                note = "Registrado na origem. Suba as APIs e os Workers novos apontando SÓ para o banco reconstruído. Voltar ao banco antigo trocando a connection string NÃO é um retorno seguro: o registro da origem bloqueia o consumo e a leitura de uma projeção que não é a ativa.",
+            });
+    }
+
+    private static RebuildOutcome PartialPromotion(string state, string reason) =>
+        new(
+            AdminExitCodes.Conflict,
+            new
+            {
+                stage = "promote",
+                state,
+                promoted = false,
+                partial = true,
+                reason,
+                note = "O registro da projeção ativa já foi confirmado na origem. Não se presume rollback: repita o estágio promote da MESMA operação ou investigue o estado do destino.",
+            });
 
     // ---------------------------------------------------------------- precondições comuns
 
@@ -915,6 +1113,85 @@ public sealed partial class RebuildCoordinator(
 
     private static RebuildOutcome Conflict(string stage, string reason) => new(AdminExitCodes.Conflict, new { stage, state = "conflict", reason });
 
+    private static RebuildOutcome Busy(string stage) =>
+        Conflict(stage, "outra operação administrativa de reconstrução está em andamento neste destino (exclusividade por alvo); nada foi alterado. Aguarde o término e repita");
+
+    /// <summary>
+    /// Exclusividade administrativa por destino ENTRE PROCESSOS: lock consultivo de sessão no próprio banco de destino, numa conexão dedicada mantida
+    /// durante todo o comando. Não é lock em memória e não toca linhas financeiras nem a Outbox. Quem não adquiriu (recebeu "ocupado") nunca
+    /// libera; a sessão que perde a conexão deixa de ser dona (<see cref="IsStillHeldAsync"/>) e o PostgreSQL libera o lock ao encerrá-la.
+    /// </summary>
+    private sealed class AdminLease : IAsyncDisposable
+    {
+        private const string Key = "hashtext('ft_rebuild_admin')";
+        private readonly NpgsqlConnection _connection;
+        private readonly ILogger _logger;
+        private bool _held = true;
+
+        private AdminLease(NpgsqlConnection connection, ILogger logger)
+        {
+            _connection = connection;
+            _logger = logger;
+        }
+
+        public static async Task<AdminLease?> TryAcquireAsync(string projection, ILogger logger, CancellationToken cancellationToken)
+        {
+            var connection = await BootstrapStore.OpenAsync(projection, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await using var command = new NpgsqlCommand($"SELECT pg_try_advisory_lock({Key})", connection);
+                if ((bool)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? false))
+                {
+                    return new AdminLease(connection, logger);
+                }
+            }
+            catch
+            {
+                await connection.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+
+            await connection.DisposeAsync().ConfigureAwait(false);
+            return null;
+        }
+
+        /// <summary>Confirma, na própria sessão dona, que o lock continua concedido. Conexão perdida lança exceção do Npgsql (tratada como destino inalcançável).</summary>
+        public async Task<bool> IsStillHeldAsync(CancellationToken cancellationToken)
+        {
+            if (!_held)
+            {
+                return false;
+            }
+
+            await using var command = new NpgsqlCommand("SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted", _connection);
+            _held = (long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0L) == 1;
+            return _held;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                if (_held)
+                {
+                    await using var command = new NpgsqlCommand($"SELECT pg_advisory_unlock({Key})", _connection);
+                    if (!(bool)(await command.ExecuteScalarAsync(CancellationToken.None).ConfigureAwait(false) ?? false))
+                    {
+                        LogUnlockNotOwner(_logger);
+                    }
+                }
+            }
+            catch (NpgsqlException)
+            {
+                // A conexão caiu: o PostgreSQL já liberou o lock ao encerrar a sessão.
+            }
+            finally
+            {
+                await _connection.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
     private static RebuildOutcome Unreachable(string stage, Exception ex) =>
         new(AdminExitCodes.Unreachable, new { stage, state = "unknown", error = FailureClassifier.Sanitize(ex) });
 
@@ -968,16 +1245,24 @@ public sealed partial class RebuildCoordinator(
         return schema ? await ReadOperationAsync(connection, cancellationToken).ConfigureAwait(false) : null;
     }
 
-    private static async Task<Guid?> ReadRegistryAsync(string origin, CancellationToken cancellationToken)
+    private static async Task<Guid?> ReadRegistryAsync(string origin, CancellationToken cancellationToken) =>
+        (await ReadRegistryRowAsync(origin, cancellationToken).ConfigureAwait(false)).ActiveId;
+
+    private readonly record struct RegistryRow(Guid? ActiveId, long Generation);
+
+    private static async Task<RegistryRow> ReadRegistryRowAsync(string origin, CancellationToken cancellationToken)
     {
         await using var connection = await BootstrapStore.OpenAsync(origin, cancellationToken).ConfigureAwait(false);
-        await using var command = new NpgsqlCommand("SELECT active_projection_id FROM consolidation_projection_registry WHERE id = 1", connection);
-        var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-        return value is Guid id ? id : null;
+        await using var command = new NpgsqlCommand("SELECT active_projection_id, generation FROM consolidation_projection_registry WHERE id = 1", connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? new RegistryRow(reader.GetGuid(0), reader.GetInt64(1)) : new RegistryRow(null, 0);
     }
 
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$", RegexOptions.CultureInvariant)]
     private static partial Regex LabelRegex();
+
+    [LoggerMessage(EventId = 5201, Level = LogLevel.Warning, Message = "pg_advisory_unlock da exclusividade da reconstrução devolveu falso: a sessão não era dona do lock.")]
+    private static partial void LogUnlockNotOwner(ILogger logger);
 
     [LoggerMessage(EventId = 5200, Level = LogLevel.Warning, Message = "Resultado do commit da captura da reconstrução desconhecido ({FailureType}); a operação será relida.")]
     private static partial void LogCommitUnknown(ILogger logger, string failureType);

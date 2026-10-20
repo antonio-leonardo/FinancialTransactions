@@ -17,6 +17,17 @@ public sealed class ScriptedRebuildPoints : IRebuildFailurePoints
 
     public Func<long, CancellationToken, Task>? AfterReplayItem { get; set; }
 
+    /// <summary>Ponto nomeado (<see cref="RebuildPoints"/>): recebe o nome e decide se pausa, falha ou intervém.</summary>
+    public Func<string, CancellationToken, Task>? OnPoint { get; set; }
+
+    public async ValueTask ReachedAsync(string point, CancellationToken cancellationToken)
+    {
+        if (OnPoint is { } hook)
+        {
+            await hook(point, cancellationToken);
+        }
+    }
+
     public async ValueTask AfterSnapshotEstablishedAsync(CancellationToken cancellationToken)
     {
         if (OnSnapshot is { } hook)
@@ -397,5 +408,266 @@ public sealed class ConsolidationRebuildTests(ITestOutputHelper output)
         Assert.Equal(10.00m, daily.Credits);
         Assert.Equal(3.25m, daily.Debits);
         output.WriteLine($"R13b API antiga: {(int)oldStatus}; API nova: {(int)newStatus}; estado da guarda: superseded");
+    }
+
+    /// <summary>Pausa o comando num ponto nomeado até o teste liberar; o teste sincroniza pelo sinal "alcançado", nunca por tempo.</summary>
+    private sealed class PointGate(string point)
+    {
+        private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Reached => _reached.Task;
+
+        public void Release() => _release.TrySetResult();
+
+        public async Task OnPointAsync(string reachedPoint, CancellationToken cancellationToken)
+        {
+            if (reachedPoint == point)
+            {
+                _reached.TrySetResult();
+                await _release.Task.WaitAsync(cancellationToken);
+            }
+        }
+    }
+
+    private static readonly TimeSpan SyncTimeout = TimeSpan.FromSeconds(60);
+
+    private static async Task<Guid> ProjectionIdAsync(RebuildTarget target) =>
+        await TargetScalarAsync<Guid>(target, "SELECT projection_id FROM rebuild_operation WHERE id = 1");
+
+    [Fact(DisplayName = "R13c_TwoCapturesWithDifferentLabels_OnlyTheOwnerOfTheOperationCompletes")]
+    public async Task R13cTwoCapturesWithDifferentLabelsOnlyTheOwnerOfTheOperationCompletes()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var requestA = Request("op-a-r13c", target);
+        var requestB = Request("op-b-r13c", target);
+        var gate = new PointGate(RebuildPoints.CaptureBeforePrepare);
+
+        // A leu "operação ausente" e para antes de preparar; B e C, de outras identidades, tentam o mesmo alvo.
+        var a = rig.Rebuilder(target, new ScriptedRebuildPoints { OnPoint = gate.OnPointAsync }).CaptureAsync(requestA, CancellationToken.None);
+        try
+        {
+            await gate.Reached.WaitAsync(SyncTimeout);
+            var b = await rig.Rebuilder(target).CaptureAsync(requestB, CancellationToken.None).WaitAsync(SyncTimeout);
+            Assert.True(b.ExitCode == AdminExitCodes.Conflict, $"B não pode concluir a operação de A: {BodyOf(b)}");
+            Assert.Contains("exclusiv", BodyOf(b), StringComparison.Ordinal);
+            var c = await rig.Rebuilder(target).CaptureAsync(Request("op-c-r13c", target), CancellationToken.None).WaitAsync(SyncTimeout);
+            Assert.Equal(AdminExitCodes.Conflict, c.ExitCode); // a recusa de B não liberou a exclusividade de A
+            Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_operation")); // nada foi preparado por quem perdeu
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        var outcome = await a.WaitAsync(SyncTimeout);
+        Assert.True(outcome.ExitCode == AdminExitCodes.Success, BodyOf(outcome));
+        Assert.Equal("op-a-r13c", await TargetScalarAsync<string>(target, "SELECT operation_label FROM rebuild_operation WHERE id = 1"));
+        Assert.Equal(RebuildStates.Captured, await StateAsync(target));
+        Assert.Equal(RebuildSeed.Plan.Length, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item"));
+        var other = await rig.Rebuilder(target).CaptureAsync(requestB, CancellationToken.None); // liberada, a operação continua sendo de A
+        Assert.Equal(AdminExitCodes.Conflict, other.ExitCode);
+        Assert.Contains("outra operação", BodyOf(other), StringComparison.Ordinal);
+    }
+
+    [Fact(DisplayName = "R13d_CancelOrSecondReplayWhileAReplayRuns_IsRefused_AndTheReplayFinishesIntact")]
+    public async Task R13dCancelOrSecondReplayWhileAReplayRunsIsRefusedAndTheReplayFinishesIntact()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13d", target, rig);
+        Assert.Equal(AdminExitCodes.Success, (await rig.Rebuilder(target).CaptureAsync(request, CancellationToken.None)).ExitCode);
+
+        var reachedReplay = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var points = new ScriptedRebuildPoints
+        {
+            AfterReplayItem = async (applied, ct) =>
+            {
+                if (applied == 2)
+                {
+                    reachedReplay.TrySetResult();
+                    await release.Task.WaitAsync(ct);
+                }
+            },
+        };
+        var replay = rig.Rebuilder(target, points).ReplayAsync(request, CancellationToken.None);
+        try
+        {
+            await reachedReplay.Task.WaitAsync(SyncTimeout);
+            var cancel = await rig.Rebuilder(target).CancelAsync(request, CancellationToken.None).WaitAsync(SyncTimeout);
+            Assert.True(cancel.ExitCode == AdminExitCodes.Conflict, $"cancelar no meio do replay de outro comando deve ser recusado: {BodyOf(cancel)}");
+            var second = await rig.Rebuilder(target).ReplayAsync(request, CancellationToken.None).WaitAsync(SyncTimeout);
+            Assert.Equal(AdminExitCodes.Conflict, second.ExitCode);
+            var promote = await rig.Rebuilder(target).PromoteAsync(request, CancellationToken.None).WaitAsync(SyncTimeout);
+            Assert.Equal(AdminExitCodes.Conflict, promote.ExitCode);
+            Assert.Equal(RebuildStates.Captured, await StateAsync(target)); // ninguém mexeu na operação alheia
+            Assert.Equal(2, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events"));
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+
+        var outcome = await replay.WaitAsync(SyncTimeout);
+        Assert.Equal(AdminExitCodes.Success, outcome.ExitCode);
+        Assert.Equal(RebuildStates.Replayed, await StateAsync(target));
+        Assert.Equal(RebuildSeed.Plan.Length, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM processed_events"));
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) - COUNT(DISTINCT event_id) FROM processed_events"));
+    }
+
+    [Fact(DisplayName = "R13e_CancelAndSecondPromoteWhilePromotionRuns_AreRefused_PromotionCompletes")]
+    public async Task R13eCancelAndSecondPromoteWhilePromotionRunsAreRefusedPromotionCompletes()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13e", target, rig);
+        await RunToEnabledAsync(rig.Rebuilder(target), request);
+        var gate = new PointGate(RebuildPoints.PromoteAfterRegistry);
+
+        var promotion = rig.Rebuilder(target, new ScriptedRebuildPoints { OnPoint = gate.OnPointAsync }).PromoteAsync(request, CancellationToken.None);
+        try
+        {
+            await gate.Reached.WaitAsync(SyncTimeout); // registro da origem confirmado, marca local ainda não
+            var cancel = await rig.Rebuilder(target).CancelAsync(request, CancellationToken.None).WaitAsync(SyncTimeout);
+            Assert.True(cancel.ExitCode == AdminExitCodes.Conflict, $"cancelar durante a promoção deve ser recusado: {BodyOf(cancel)}");
+            var second = await rig.Rebuilder(target).PromoteAsync(request, CancellationToken.None).WaitAsync(SyncTimeout);
+            Assert.Equal(AdminExitCodes.Conflict, second.ExitCode);
+            Assert.Equal(RebuildStates.Enabled, await StateAsync(target));
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        var outcome = await promotion.WaitAsync(SyncTimeout);
+        Assert.True(outcome.ExitCode == AdminExitCodes.Success, BodyOf(outcome));
+        Assert.Contains("\"promoted\": true", BodyOf(outcome), StringComparison.Ordinal);
+        Assert.Equal(RebuildStates.Promoted, await StateAsync(target));
+        Assert.Equal(await ProjectionIdAsync(target), await rig.OriginScalarAsync<Guid>("SELECT active_projection_id FROM consolidation_projection_registry WHERE id = 1"));
+    }
+
+    [Fact(DisplayName = "R13f_PromotionInterruptedAfterTheOriginRegistry_CancelIsRefused_ResumeCompletes_OldDatabaseStaysBlocked")]
+    public async Task R13fPromotionInterruptedAfterTheOriginRegistryCancelIsRefusedResumeCompletesOldDatabaseStaysBlocked()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13f", target, rig);
+        await RunToEnabledAsync(rig.Rebuilder(target), request);
+
+        // Queda depois do commit na origem e antes da marca no destino.
+        var crash = new ScriptedRebuildPoints { OnPoint = (point, _) => point == RebuildPoints.PromoteAfterRegistry ? throw new InvalidOperationException("queda entre os dois bancos") : Task.CompletedTask };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Rebuilder(target, crash).PromoteAsync(request, CancellationToken.None));
+        var projectionId = await ProjectionIdAsync(target);
+        Assert.Equal(projectionId, await rig.OriginScalarAsync<Guid>("SELECT active_projection_id FROM consolidation_projection_registry WHERE id = 1"));
+        Assert.Equal(RebuildStates.Enabled, await StateAsync(target));
+
+        // Cancelar agora fingiria que a troca não ocorreu: recusado, estado intacto.
+        var cancel = await rig.Rebuilder(target).CancelAsync(request, CancellationToken.None);
+        Assert.True(cancel.ExitCode == AdminExitCodes.Conflict, BodyOf(cancel));
+        Assert.Contains("promoção", BodyOf(cancel), StringComparison.Ordinal);
+        Assert.Equal(RebuildStates.Enabled, await StateAsync(target));
+        Assert.Equal(projectionId, await rig.OriginScalarAsync<Guid>("SELECT active_projection_id FROM consolidation_projection_registry WHERE id = 1"));
+
+        // Retomada da mesma operação: completa a marca sem regravar o registro.
+        var generationBefore = await rig.OriginScalarAsync<long>("SELECT generation FROM consolidation_projection_registry WHERE id = 1");
+        var resumed = await rig.Rebuilder(target).PromoteAsync(request, CancellationToken.None);
+        Assert.True(resumed.ExitCode == AdminExitCodes.Success, BodyOf(resumed));
+        Assert.Contains("\"promoted\": true", BodyOf(resumed), StringComparison.Ordinal);
+        Assert.Equal(RebuildStates.Promoted, await StateAsync(target));
+        Assert.Equal(generationBefore, await rig.OriginScalarAsync<long>("SELECT generation FROM consolidation_projection_registry WHERE id = 1"));
+        var repeat = await rig.Rebuilder(target).PromoteAsync(request, CancellationToken.None);
+        Assert.Equal(AdminExitCodes.Success, repeat.ExitCode); // idempotente
+
+        // O banco antigo continua bloqueado depois da retomada.
+        var oldWorker = await rig.StartWorkerAsync();
+        var health = oldWorker.App.Services.GetRequiredService<ConsolidationHealthState>();
+        await ConsolidationRig.Eventually(() => Task.FromResult(health.Has(DegradedReason.ProjectionSuperseded)), "o Worker no banco antigo deve ser recusado como superado");
+    }
+
+    [Fact(DisplayName = "R13g_CancelOfAnEnabledOperationWithUnreadableOrigin_IsUnknown_NeverCancelled")]
+    public async Task R13gCancelOfAnEnabledOperationWithUnreadableOriginIsUnknownNeverCancelled()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13g", target, rig);
+        await RunToEnabledAsync(rig.Rebuilder(target), request);
+
+        var unreadable = ConsolidationRig.RebuilderWithOrigin(target, new NpgsqlConnectionStringBuilder(rig.OriginConnection) { Port = 1, Timeout = 1 }.ConnectionString);
+        var cancel = await unreadable.CancelAsync(request, CancellationToken.None);
+
+        Assert.True(cancel.ExitCode == AdminExitCodes.Unreachable, $"sem ler a origem não se pode afirmar que a troca não ocorreu: {BodyOf(cancel)}");
+        Assert.Equal(RebuildStates.Enabled, await StateAsync(target));
+
+        var readable = await rig.Rebuilder(target).CancelAsync(request, CancellationToken.None); // com a origem legível e sem registro, cancelar é seguro
+        Assert.Equal(AdminExitCodes.Success, readable.ExitCode);
+        Assert.Equal(RebuildStates.Cancelled, await StateAsync(target));
+    }
+
+    [Fact(DisplayName = "R13h_ZeroRowsOnTheLocalPromotionMark_IsNeverAnnouncedAsPromoted")]
+    public async Task R13hZeroRowsOnTheLocalPromotionMarkIsNeverAnnouncedAsPromoted()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r13h", target, rig);
+        await RunToEnabledAsync(rig.Rebuilder(target), request);
+
+        // Intervenção declarada: SQL direto no destino (fora do coordenador) entre o registro na origem e a marca local.
+        var points = new ScriptedRebuildPoints
+        {
+            OnPoint = async (point, ct) =>
+            {
+                if (point == RebuildPoints.PromoteAfterRegistry)
+                {
+                    await using var connection = new NpgsqlConnection(target.Connection);
+                    await connection.OpenAsync(ct);
+                    await using var command = new NpgsqlCommand("UPDATE rebuild_operation SET state = 'cancelled', cancelled_at = statement_timestamp() WHERE id = 1", connection);
+                    await command.ExecuteNonQueryAsync(ct);
+                }
+            },
+        };
+        var outcome = await rig.Rebuilder(target, points).PromoteAsync(request, CancellationToken.None);
+
+        Assert.True(outcome.ExitCode != AdminExitCodes.Success, $"zero linhas não comprova a transição: {BodyOf(outcome)}");
+        Assert.DoesNotContain("\"promoted\": true", BodyOf(outcome), StringComparison.Ordinal);
+        Assert.Equal(RebuildStates.Cancelled, await StateAsync(target));
+    }
+
+    [Fact(DisplayName = "R10e_CeilingIsRevalidatedInsideTheSnapshot_PostBetweenPreflightAndSnapshot_IsAcceptedAndCaptureRefused")]
+    public async Task R10eCeilingIsRevalidatedInsideTheSnapshotPostBetweenPreflightAndSnapshotIsAcceptedAndCaptureRefused()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        var at = await RebuildSeed.ConvergeAsync(rig);
+        var target = await rig.CreateRebuildTargetAsync();
+        var request = Request("op-r10e", target);
+        Guid? late = null;
+        var points = new ScriptedRebuildPoints
+        {
+            OnPoint = async (point, ct) =>
+            {
+                if (point == RebuildPoints.CaptureBeforeSnapshot)
+                {
+                    late = await rig.PostOkAsync(RebuildSeed.CustomerA, RebuildSeed.A1, "Credit", 1.00m, at); // o lançamento legítimo é aceito
+                }
+            },
+        };
+
+        // O preflight passa no teto exato; o lançamento confirmado antes do snapshot faz a visão enumerada exceder o teto.
+        var outcome = await rig.Rebuilder(target, points, movementCeiling: RebuildSeed.Plan.Length).CaptureAsync(request, CancellationToken.None);
+
+        Assert.NotNull(late);
+        Assert.Equal(1, await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM movements WHERE id = @id", ("id", late.GetValueOrDefault())));
+        Assert.True(outcome.ExitCode == AdminExitCodes.Conflict, BodyOf(outcome));
+        Assert.Contains("teto", BodyOf(outcome), StringComparison.Ordinal);
+        Assert.Equal(RebuildStates.Prepared, await StateAsync(target)); // nenhum R selado
+        Assert.Equal(0, await TargetScalarAsync<long>(target, "SELECT COUNT(*) FROM rebuild_capture_item")); // nenhum R parcial
+        Assert.Null(await TargetScalarAsync<string?>(target, "SELECT capture_digest FROM rebuild_operation WHERE id = 1") is { Length: > 0 } digest ? digest : null);
     }
 }
