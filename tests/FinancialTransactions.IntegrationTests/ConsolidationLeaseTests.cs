@@ -193,6 +193,84 @@ public sealed class ConsolidationLeaseTests(ITestOutputHelper output)
         Assert.Equal(1, await rig.OutboxCountAsync(1));
     }
 
+    private static Task<bool> DeferredAsync(ConsolidationRig rig, Guid eventId) =>
+        rig.OriginScalarAsync<bool>("SELECT next_eligible_at IS NOT NULL FROM consolidation_outbox WHERE event_id = @id", ("id", eventId));
+
+    [Fact(DisplayName = "R02b_ReleaseHonorsTheLeaseValidity_ValidReleasesWithDelay_ExpiredWithTheOldTokenChangesNothing_TakenByBStaysIntact")]
+    public async Task R02bReleaseHonorsTheLeaseValidityValidReleasesWithDelayExpiredWithTheOldTokenChangesNothingTakenByBStaysIntact()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        var source = LeaseSupport.NewSource(rig);
+
+        // (1) Reserva válida: libera, limpa a posse e adia a próxima elegibilidade.
+        var valid = await LeaseSupport.InsertEventAsync(rig);
+        var a1 = await source.AcquireAsync("owner-a", null, Lease, CancellationToken.None);
+        Assert.NotNull(a1);
+        Assert.True(await source.ReleaseAsync(a1.Event.Sequence, a1.Token, TimeSpan.FromSeconds(60), CancellationToken.None));
+        var released = await LeaseSupport.LeaseStateAsync(rig, valid);
+        Assert.Equal(((short)0, (string?)null, (Guid?)null), (released.Status, released.Owner, released.Token));
+        Assert.True(await DeferredAsync(rig, valid));
+        Assert.Null(await source.AcquireAsync("owner-b", null, Lease, CancellationToken.None)); // adiado: ainda não elegível
+
+        // (2) Reserva vencida, ainda com o token de A e sem B: a liberação é recusada e NADA muda, nem a próxima elegibilidade.
+        var expired = await LeaseSupport.InsertEventAsync(rig);
+        var a2 = await source.AcquireAsync("owner-a", null, Lease, CancellationToken.None);
+        Assert.NotNull(a2);
+        Assert.Equal(expired, a2.Event.EventId);
+        await LeaseSupport.ExpireLeaseNowAsync(rig, expired); // intervenção declarada, em banco descartável
+        var before = await LeaseSupport.LeaseStateAsync(rig, expired);
+        Assert.False(await source.ReleaseAsync(a2.Event.Sequence, a2.Token, TimeSpan.FromSeconds(60), CancellationToken.None));
+        var after = await LeaseSupport.LeaseStateAsync(rig, expired);
+        Assert.Equal(before, after);
+        Assert.False(await DeferredAsync(rig, expired)); // a recusa não adiou trabalho já elegível
+
+        // (3) B toma a reserva vencida: a liberação tardia de A continua sem efeito.
+        var b = await source.AcquireAsync("owner-b", null, Lease, CancellationToken.None);
+        Assert.NotNull(b);
+        Assert.Equal(expired, b.Event.EventId);
+        var withB = await LeaseSupport.LeaseStateAsync(rig, expired);
+        Assert.False(await source.ReleaseAsync(a2.Event.Sequence, a2.Token, TimeSpan.FromSeconds(60), CancellationToken.None));
+        Assert.Equal(withB, await LeaseSupport.LeaseStateAsync(rig, expired));
+        Assert.Equal(b.Token, withB.Token);
+        Assert.False(await DeferredAsync(rig, expired));
+        output.WriteLine("R02b: reserva válida libera e adia; vencida com token antigo (sem B) e tomada por B: recusadas sem alterar estado nem agendamento");
+    }
+
+    [Fact(DisplayName = "R02c_ConsumerRefusedReleaseOfAnExpiredLease_IsALeaseLossDiagnostic_NotARelease_AndTheEventStillConverges")]
+    public async Task R02cConsumerRefusedReleaseOfAnExpiredLeaseIsALeaseLossDiagnosticNotAReleaseAndTheEventStillConverges()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        await rig.BringToLiveAsync();
+        var gate = new Gate();
+        var points = new TestConsolidationFailurePoints();
+        points.InsideProjectionTransactionOnce(async ct =>
+        {
+            await gate.PassAsync(ct);
+            throw new TimeoutException("projeção indisponível (injetada)"); // falha transitória depois de a reserva vencer
+        });
+        var worker = await rig.StartWorkerAsync(new WorkerStart { FailurePoints = points });
+        var id = await LeaseSupport.InsertEventAsync(rig, type: 1, amount: 3.00m);
+
+        await gate.Reached.WaitAsync(TimeSpan.FromSeconds(30)); // o Worker tem a reserva e está dentro da transação da projeção
+        Assert.Equal(1, (await LeaseSupport.LeaseStateAsync(rig, id)).Token is null ? 0 : 1);
+        await LeaseSupport.ExpireLeaseNowAsync(rig, id);
+        gate.Release();
+
+        await ConsolidationRig.Eventually(
+            () => Task.FromResult(worker.Diagnostics.Events.Any(e => e.Kind == "LeaseLost" && (e.Detail ?? string.Empty).EndsWith("/liberação", StringComparison.Ordinal))),
+            "perda de posse diagnosticada na liberação recusada");
+        var counters = LeaseSupport.CountersOf(worker).Snapshot();
+        Assert.Equal(0, counters.Releases); // a liberação recusada não conta como liberação
+        Assert.True(counters.LeaseLosses >= 1);
+        Assert.False(await DeferredAsync(rig, id));
+
+        // O evento não fica retido: a própria instância o readquire e a soma entra uma vez.
+        await ConsolidationRig.Eventually(async () => (await LeaseSupport.LeaseStateAsync(rig, id)).Status == 1, "evento confirmado depois da perda de posse");
+        Assert.Equal(1, await rig.ProcessedCountAsync());
+        Assert.Equal(3.00m, await rig.ProjectionScalarAsync<decimal>("SELECT COALESCE(SUM(credits), 0) FROM daily_account_consolidation WHERE account_id = @a", ("a", LeaseSupport.A1)));
+        Assert.Equal(0, (await LeaseSupport.LeaseStateAsync(rig, id)).Attempts);
+    }
+
     [Fact(DisplayName = "R03_TwoWorkersApplyDifferentEventsOfTheSameAccountDay_ExactTotals_FailureAfterDestinationCommit")]
     public async Task R03TwoWorkersApplyDifferentEventsOfTheSameAccountDayExactTotalsFailureAfterDestinationCommit()
     {

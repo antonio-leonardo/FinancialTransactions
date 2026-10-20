@@ -189,7 +189,8 @@ public sealed partial class QuarantineAdmin(IConsolidationConnectionFactory conn
     private static readonly Regex OperationIdPattern = OperationIdRegex();
 
     private const string SelectSql = """
-        SELECT sequence, event_id, status, attempts, last_error
+        -- xmin: versão da linha na origem. Cada UPDATE (inclusive uma nova passagem pela quarentena) gera outra; o plano fica preso ao que foi revisado.
+        SELECT sequence, event_id, status, attempts, last_error, xmin::text
         FROM consolidation_outbox
         WHERE event_id = ANY(@ids)
         ORDER BY event_id
@@ -467,7 +468,7 @@ public sealed partial class QuarantineAdmin(IConsolidationConnectionFactory conn
     }
 
     private static string PlanDigest(IReadOnlyList<SelectedRow> rows) =>
-        Digest(string.Join('\n', rows.OrderBy(r => r.EventId).Select(r => FormattableString.Invariant($"{r.EventId:D}|{r.Sequence}|{r.Status}|{r.Attempts}"))));
+        Digest(string.Join('\n', rows.OrderBy(r => r.EventId).Select(r => FormattableString.Invariant($"{r.EventId:D}|{r.Sequence}|{r.Status}|{r.Attempts}|{r.Revision}"))));
 
     private static string Digest(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
@@ -480,7 +481,7 @@ public sealed partial class QuarantineAdmin(IConsolidationConnectionFactory conn
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            rows.Add(new SelectedRow(reader.GetInt64(0), reader.GetGuid(1), reader.GetInt16(2), reader.GetInt32(3), reader.IsDBNull(4) ? null : reader.GetString(4)));
+            rows.Add(new SelectedRow(reader.GetInt64(0), reader.GetGuid(1), reader.GetInt16(2), reader.GetInt32(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5)));
         }
 
         return rows;
@@ -508,7 +509,7 @@ public sealed partial class QuarantineAdmin(IConsolidationConnectionFactory conn
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$", RegexOptions.CultureInvariant)]
     private static partial Regex OperationIdRegex();
 
-    private sealed record SelectedRow(long Sequence, Guid EventId, short Status, int Attempts, string? LastError);
+    private sealed record SelectedRow(long Sequence, Guid EventId, short Status, int Attempts, string? LastError, string Revision);
 
     private sealed record OperationRow(string SelectionDigest, int EventCount);
 }

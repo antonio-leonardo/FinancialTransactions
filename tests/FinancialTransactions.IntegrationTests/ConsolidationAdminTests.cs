@@ -175,6 +175,52 @@ public sealed class ConsolidationAdminTests(ITestOutputHelper output)
         Assert.Equal(snapshot, await OriginSnapshotAsync(rig));
     }
 
+    [Fact(DisplayName = "R06d_PlanIsBoundToTheRowRevision_OldPlanRefusedAfterAnotherReopening_NewPlanWorks_RepeatStaysIdempotent")]
+    public async Task R06dPlanIsBoundToTheRowRevisionOldPlanRefusedAfterAnotherReopeningNewPlanWorksRepeatStaysIdempotent()
+    {
+        await using var rig = await ConsolidationRig.CreateAsync();
+        var e = await LeaseSupport.InsertEventAsync(rig, type: 9, status: 2, attempts: 5, lastError: QuarantineError);
+
+        // Plano A, revisado pelo operador A: evento em quarentena com cinco tentativas.
+        var (_, planA) = await RequeueAsync(rig, "op-r06-d1", [e], apply: false);
+        var digestA = planA.GetProperty("planDigest").GetString()!;
+
+        // Outra operação reabre o evento; a causa persiste e ele volta a 2/5 (a volta é reproduzida por UPDATE no banco descartável,
+        // equivalente ao que o consumidor grava ao esgotar as tentativas; intervenção declarada).
+        var (_, planB) = await RequeueAsync(rig, "op-r06-d2", [e], apply: false);
+        var digestB = planB.GetProperty("planDigest").GetString()!;
+        Assert.Equal(digestA, digestB); // mesma versão da linha: os dois planos coincidem até alguém aplicar um deles
+        var (applyBExit, _) = await RequeueAsync(rig, "op-r06-d2", [e], apply: true, digest: digestB);
+        Assert.Equal(AdminExitCodes.Success, applyBExit);
+        await rig.OriginExecuteAsync("UPDATE consolidation_outbox SET status = 2, attempts = 5, last_error = @e WHERE event_id = @id", ("e", QuarantineError), ("id", e));
+        var requarantined = await LeaseSupport.LeaseStateAsync(rig, e);
+        Assert.Equal(((short)2, 5), (requarantined.Status, requarantined.Attempts)); // mesmo estado resumido que o plano A viu
+
+        var snapshot = await OriginSnapshotAsync(rig);
+        var logsBefore = await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM consolidation_outbox_admin_log");
+
+        // O plano A, de uma versão anterior da linha, é recusado sem trilha nem efeito parcial.
+        var (staleExit, stale) = await RequeueAsync(rig, "op-r06-d1", [e], apply: true, digest: digestA);
+        Assert.Equal(AdminExitCodes.Conflict, staleExit);
+        Assert.Equal("aborted", stale.GetProperty("state").GetString());
+        Assert.Equal(snapshot, await OriginSnapshotAsync(rig));
+        Assert.Equal(logsBefore, await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM consolidation_outbox_admin_log"));
+        Assert.Equal(0, await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM consolidation_outbox_admin_operation WHERE operation_id = 'op-r06-d1'"));
+
+        // Um plano novo, da versão atual, funciona; a repetição da operação já concluída continua idempotente.
+        var (_, planC) = await RequeueAsync(rig, "op-r06-d3", [e], apply: false);
+        var digestC = planC.GetProperty("planDigest").GetString()!;
+        Assert.NotEqual(digestA, digestC);
+        var (applyCExit, _) = await RequeueAsync(rig, "op-r06-d3", [e], apply: true, digest: digestC);
+        Assert.Equal(AdminExitCodes.Success, applyCExit);
+        var afterC = await OriginSnapshotAsync(rig);
+        var (repeatExit, repeat) = await RequeueAsync(rig, "op-r06-d3", [e], apply: true, digest: digestC);
+        Assert.Equal(AdminExitCodes.Success, repeatExit);
+        Assert.Equal("already_applied", repeat.GetProperty("state").GetString());
+        Assert.Equal(afterC, await OriginSnapshotAsync(rig));
+        output.WriteLine($"R06d plano antigo {digestA[..12]} recusado; plano novo {digestC[..12]} aplicado; repetição idempotente");
+    }
+
     private static void ConfigureConnections(Microsoft.Extensions.Hosting.HostApplicationBuilder builder, ConsolidationRig rig, TestConnectionFactory? factory = null)
     {
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
@@ -189,8 +235,8 @@ public sealed class ConsolidationAdminTests(ITestOutputHelper output)
         }
     }
 
-    [Fact(DisplayName = "R07a_TwoWorkersBootstrap_ExactMemberSet_NewEventsWaitForLive_PromotionDoesNotRegress")]
-    public async Task R07aTwoWorkersBootstrapExactMemberSetNewEventsWaitForLivePromotionDoesNotRegress()
+    [Fact(DisplayName = "R07a_TwoWorkersBootstrap_NonMemberWaitsForLiveWhileAMemberIsHeld_ExactMemberSet_PromotionDoesNotRegress")]
+    public async Task R07aTwoWorkersBootstrapNonMemberWaitsForLiveWhileAMemberIsHeldExactMemberSetPromotionDoesNotRegress()
     {
         await using var rig = await ConsolidationRig.CreateAsync();
         var at = DateTimeOffset.UtcNow.AddMinutes(-1);
@@ -210,32 +256,40 @@ public sealed class ConsolidationAdminTests(ITestOutputHelper output)
         Assert.Equal(12, await rig.OriginScalarAsync<long>("SELECT COUNT(*) FROM consolidation_outbox WHERE bootstrap_id = @id", ("id", bootstrapId)));
         Assert.Null(await rig.OriginScalarAsync<Guid?>("SELECT bootstrap_id FROM consolidation_outbox WHERE event_id = @id", ("id", newcomer)));
 
-        var phases = new List<string>();
-        long processedAtPromotion = -1;
-        long newcomerReceiptsAtPromotion = -1;
-        var diagnostics1 = new TestDiagnostics
+        // Barreira causal: o Worker 1 aplica um membro na projeção e fica retido antes de confirmá-lo na origem; o membro segue pendente e reservado,
+        // o que impede a reconciliação e a promoção enquanto a barreira estiver fechada. A prova não depende de qual Worker promove.
+        var gate = new Gate();
+        var points = new TestConsolidationFailurePoints();
+        points.AfterProjectionCommitBeforeMarkOnce(async ct =>
         {
-            OnPhaseChanged = phase =>
-            {
-                phases.Add(phase);
-                processedAtPromotion = SyncCount(rig.ProjectionConnection, "SELECT COUNT(*) FROM processed_events");
-                newcomerReceiptsAtPromotion = SyncCount(rig.ProjectionConnection, $"SELECT COUNT(*) FROM processed_events WHERE event_id = '{newcomer}'");
-            },
-        };
-        var worker1 = await rig.StartWorkerAsync(new WorkerStart { Diagnostics = diagnostics1 });
+            await gate.PassAsync(ct);
+            throw new InvalidOperationException("falha injetada");
+        });
+        var worker1 = await rig.StartWorkerAsync(new WorkerStart { FailurePoints = points });
+        await gate.Reached.WaitAsync(TimeSpan.FromSeconds(30));
         var worker2 = await rig.StartWorkerAsync();
+        await ConsolidationRig.Eventually(async () => await rig.OutboxCountAsync(1) >= 11, "o Worker 2 confirma os membros restantes");
+        Assert.Equal(11, await rig.OutboxCountAsync(1)); // exatamente os 11 membros: o não membro não foi consumido
 
-        await ConsolidationRig.Eventually(async () => await rig.PhaseAsync() == "live" && await rig.OutboxCountAsync(1) == 13, "live com os 13 confirmados");
-        Assert.Equal(13, await rig.ProcessedCountAsync());
-
-        // A fase que um dos Workers promoveu viu exatamente o conjunto (o novo evento ainda não existia na projeção).
-        output.WriteLine($"R07a no callback de promoção (se este Worker promoveu): processados={processedAtPromotion}, recibos do novo evento={newcomerReceiptsAtPromotion}, fases={string.Join(",", phases)}");
-        if (phases.Count > 0)
+        // Janela de observação com a barreira fechada (dezenas de ciclos ociosos do Worker 2): o não membro não é reservado nem aplicado.
+        for (var i = 0; i < 15; i++)
         {
-            Assert.Equal(12, processedAtPromotion);
-            Assert.Equal(0, newcomerReceiptsAtPromotion);
+            await Task.Delay(100);
+            Assert.Equal("loading", await rig.PhaseAsync());
+            Assert.Equal(0, await rig.ProjectionScalarAsync<long>("SELECT COUNT(*) FROM processed_events WHERE event_id = @id", ("id", newcomer)));
+            Assert.Equal(12, await rig.ProcessedCountAsync()); // os 12 membros, nada além
         }
 
+        var newcomerState = await LeaseSupport.LeaseStateAsync(rig, newcomer);
+        Assert.Equal(((short)0, 0, (string?)null), (newcomerState.Status, newcomerState.Attempts, newcomerState.Owner));
+        Assert.Equal(11, LeaseSupport.CountersOf(worker2).Snapshot().Acquisitions); // o Worker 2 nunca adquiriu o não membro
+        Assert.Equal(1, LeaseSupport.CountersOf(worker1).Snapshot().Acquisitions);
+        Assert.Equal(2, await rig.OutboxCountAsync(0)); // pendentes: o membro retido e o não membro
+        output.WriteLine("R07a com a barreira fechada: fase loading, 12 recibos, não membro sem reserva nem recibo, Worker 2 com 11 aquisições");
+
+        gate.Release();
+        await ConsolidationRig.Eventually(async () => await rig.PhaseAsync() == "live" && await rig.OutboxCountAsync(1) == 13, "live com os 13 confirmados");
+        Assert.Equal(13, await rig.ProcessedCountAsync());
         Assert.Equal(members.Concat([newcomer]).ToHashSet(), (await rig.ProjectionGuidsAsync("SELECT event_id FROM processed_events")).ToHashSet());
         for (var i = 0; i < 10; i++)
         {
@@ -247,6 +301,7 @@ public sealed class ConsolidationAdminTests(ITestOutputHelper output)
         Assert.False(worker2.App.Services.GetRequiredService<ConsolidationHealthState>().Has(DegradedReason.ReconciliationFailed));
         Assert.Equal(0, await rig.ProjectionScalarAsync<long>("SELECT COUNT(*) - COUNT(DISTINCT event_id) FROM processed_events"));
         Assert.Equal(13, LeaseSupport.CountersOf(worker1).Snapshot().AppliedNew + LeaseSupport.CountersOf(worker2).Snapshot().AppliedNew);
+        Assert.Equal(1, LeaseSupport.CountersOf(worker1).Snapshot().DuplicatesAvoided); // o membro retido foi reentregue sem somar de novo
     }
 
     [Fact(DisplayName = "R07b_ReconcilerFindingLiveByTheLockRecheck_ReturnsAlreadyLive_NoFalseDivergence_NoRegression")]
@@ -303,14 +358,6 @@ public sealed class ConsolidationAdminTests(ITestOutputHelper output)
         await Task.Delay(500);
         Assert.Equal("loading", await rig.PhaseAsync()); // nunca promovido
         Assert.True(worker.App.Services.GetRequiredService<ConsolidationHealthState>().Has(DegradedReason.ReconciliationFailed));
-    }
-
-    private static long SyncCount(string connectionString, string sql)
-    {
-        using var connection = new NpgsqlConnection(connectionString);
-        connection.Open();
-        using var command = new NpgsqlCommand(sql, connection);
-        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
     [Fact(DisplayName = "R08a_StatusDistinguishesPendingReservedExpiredQuarantine_DependencyDownIsUnknownNotZero")]

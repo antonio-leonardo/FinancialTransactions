@@ -456,6 +456,11 @@ public sealed partial class ConsolidationConsumer(
             {
                 counters.Released();
             }
+            else
+            {
+                // Reserva vencida ou já de outra aquisição: nada foi alterado (nem o agendamento). O vencimento ou a releitura recuperam o evento.
+                NoteLeaseLost(leased.Event.Sequence, "liberação");
+            }
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {

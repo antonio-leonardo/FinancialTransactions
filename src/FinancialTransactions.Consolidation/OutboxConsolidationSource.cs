@@ -39,7 +39,7 @@ public interface IConsolidationSource
     /// <summary>Conta uma tentativa que falhou por defeito do evento e libera a reserva; ao atingir <paramref name="maxAttempts"/> o evento vai à quarentena.</summary>
     Task<FailureRecording> RecordFailureAsync(long sequence, Guid token, string sanitizedError, int maxAttempts, TimeSpan retryDelay, CancellationToken cancellationToken);
 
-    /// <summary>Libera uma reserva própria sem contar tentativa (falha de infraestrutura, encerramento), com adiamento opcional. Falso: a posse já não era do token.</summary>
+    /// <summary>Libera uma reserva própria ainda válida sem contar tentativa (falha de infraestrutura, encerramento), com adiamento opcional. Falso: a posse já não era desta aquisição (vencida, trocada ou evento já fora de pendente); nada foi alterado.</summary>
     Task<bool> ReleaseAsync(long sequence, Guid token, TimeSpan retryDelay, CancellationToken cancellationToken);
 
     /// <summary>Pendentes (0, reservados ou não) e em quarentena (2) dentro do conjunto inicial.</summary>
@@ -94,7 +94,7 @@ public sealed class OutboxConsolidationSource(IConsolidationConnectionFactory co
         UPDATE consolidation_outbox
         SET lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
             next_eligible_at = CASE WHEN @delay_seconds > 0 THEN statement_timestamp() + make_interval(secs => @delay_seconds) ELSE NULL END
-        WHERE sequence = @sequence AND status = 0 AND lease_token = @token
+        WHERE sequence = @sequence AND status = 0 AND lease_token = @token AND lease_expires_at > statement_timestamp()
         """;
 
     public async Task<LeasedEvent?> AcquireAsync(string owner, Guid? bootstrapId, TimeSpan leaseDuration, CancellationToken cancellationToken)

@@ -444,7 +444,7 @@ Origem: parecer do auditor-master sobre o commit `a055816243e29088f47c41d372f231
 
 ## 10. Ciclo P08, parte A: reserva durável, duas instâncias, quarentena e observação
 
-**Estado:** implementado e **executado pelo executor** (execução local, 19/10/2026), aguardando auditoria independente. Não é aprovação da governança nem execução da CI. As partes B (reconciliação ampla e reconstrução) e C (carga dos 50 req/s) **não foram executadas**; os critérios correspondentes continuam não demonstrados. Os 50 req/s com no máximo 5% de perda seguem como **requisito obrigatório sem medição**.
+**Estado:** implementado e **executado pelo executor** (execução local, 19/10/2026), com um lote complementar em 20/10/2026 (seção 10.4) depois do parecer parcial do auditor. Os contadores e as sondagens desta seção são registros do executor; não são aprovação da governança. Cronologia da CI: no checkpoint pré-publicação a CI não havia executado a parte A; depois da publicação do commit `4f0f10e`, o auditor leu o run 11 (seção 10.4). As partes B (reconciliação ampla e reconstrução) e C (carga dos 50 req/s) **não foram executadas**; os critérios correspondentes continuam não demonstrados. Os 50 req/s com no máximo 5% de perda seguem como **requisito obrigatório sem medição**.
 
 ### 10.1 Controles R01 a R08
 
@@ -472,3 +472,20 @@ Testes de autenticação, EX01, EX02 e C14 continuam na suíte e passaram.
 ### 10.3 Limites
 
 A CI não executou nada disto. As duas instâncias rodam na mesma máquina e no mesmo par de bancos: demonstram o mecanismo, não alta disponibilidade. A reserva não elimina toda execução sobreposta (ADR-14). Nenhuma migration foi aplicada nos bancos de desenvolvimento (`financialtransactions` e `financialtransactions_consolidation`); a migration `AddOutboxLeaseAndAdminTrail` precisa ser aplicada por quem os usa (`dotnet ef database update`). A vazão por instância não foi medida (parte C).
+
+### 10.4 Lote complementar da parte A (depois do parecer parcial sobre o commit `4f0f10e`)
+
+**Fonte e cronologia.** O commit `4f0f10e6d187a2921a906fb129a7d1cb50eed5ce` ("Inicialização do P08") publicou a parte A depois do checkpoint pré-publicação, no qual a CI ainda não a havia executado. O auditor leu o [run 39345385454](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39345385454) (número 11, tentativa 1, job 118376609399, `completed/success`, Ubuntu 24.04.5, SDK 10.0.402, dois PostgreSQL 17.11): build Release de 11 assemblies, zero warnings, 193 testes de unidade e 115 de integração aprovados (308). É **leitura histórica do auditor** para esse SHA; não cobre a sondagem com processos reais, as mutações nem o lote abaixo, e não prova nominalmente os 273 casos herdados (isso vem dos TRX locais).
+
+**Achados tratados** (parecer do auditor sobre `4f0f10e`):
+
+| Achado | Tratamento | Controle |
+|---|---|---|
+| P08A-01 (P1): a liberação com adiamento não verificava o vencimento e zero linhas não tinha diagnóstico | `ReleaseSql` passou a exigir `lease_expires_at > statement_timestamp()`; o consumidor trata o retorno falso como perda de posse (contador, diagnóstico `LeaseLost` na etapa "liberação", log) e não como liberação | `R02b` (válida libera e adia; vencida com o token antigo e sem B não altera nada, nem a próxima elegibilidade; tomada por B permanece intacta) e `R02c` (no Worker, a liberação recusada vira diagnóstico e o evento converge); mutações MX-A01 e MX-A04 |
+| P08A-02 (P2): R07a podia pular a asserção central | barreira causal: um membro aplicado e retido no Worker 1 impede a reconciliação; com a barreira fechada, o Worker 2 confirma exatamente os 11 membros restantes e, durante 15 observações, o não membro não é reservado nem aplicado e a fase permanece `loading`; depois da liberação, convergência sem regressão. Não depende de qual Worker promove | `R07a` reescrito (o nome anterior foi substituído); mutação MX-A02 |
+| P08A-03 (P2): o digest não distinguia uma nova passagem pela quarentena | o plano passou a incluir a versão da linha (`xmin`); disposição: `xmin` é token de versão de curta duração, não identidade histórica | `R06d` (plano antigo recusado, sem trilha nem efeito; plano novo aplicado; repetição idempotente); mutação MX-A03 |
+| P08A-04 (P2): procedência do roteiro | o arquivo original v1.0 (390 linhas, SHA-256 `8c1abf64c08ad6dba197231b7a67980aa76450d210aae86ff6ee8d0f317bcad9`) foi copiado para o kit privado em 19/10/2026, com autorização do usuário, e o hash conferido; a parte A foi executada com o texto equivalente colado na conversa | registro no checkpoint complementar |
+
+**Resultados (executor).** Restore e build Release `-warnaserror` `rc=0`, 0 avisos, 11 assemblies. Duas rodadas completas: unidade **193/193** e integração **118/118** em ambas, com nomes idênticos entre as rodadas. Dos 308 nomes da parte A, um foi substituído de propósito (o antigo `R07a_...`); os 273 nomes anteriores à parte A continuam todos presentes; os novos são `R02b`, `R02c`, `R06d` e o `R07a` reescrito. Mutações em cópia descartável, cada uma com o positivo antes: MX-A01 (`Assert.False` falhou: a liberação vencida teve efeito), MX-A02 (`Assert.Equal(11, 12)`: o não membro foi consumido), MX-A03 (o plano antigo foi aceito) e MX-A04 (o diagnóstico de perda não foi emitido; reprova por ausência do evento esperado). Duas tentativas anteriores foram invalidadas e ficaram preservadas: MX-A02 em `c1` reprovou por *timeout* de uma barreira, e a asserção foi ajustada para comparar o valor exato; MX-A04 em `c1` não localizou o trecho (codificação no auxiliar).
+
+**Limites.** A sondagem com processos reais da parte A não foi repetida depois deste lote (a alteração é uma condição no SQL de liberação e testes). O lote não executa as partes B e C, a CI não o executou, e a migration continua sem aplicação nos bancos de desenvolvimento.
