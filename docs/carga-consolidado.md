@@ -55,17 +55,17 @@ Cada linha é uma repetição com par de bancos próprio e é aprovada ou reprov
 
 ### GET por repeticao (L1, L2, L3)
 
-| Repetição | Rota | Programadas | Emitidas | Uteis | Tardias | Erro HTTP | Corpo invalido | Transporte | Nao emitidas | Perda | complete/stale/unknown | HTTP p50/p95/p99/max (ms) | Desde a programacao p50/p95/p99/max (ms) | Taxa alcancada (req/s) | Gerador | Resultado |
+| Repetição | Rota | Programadas | Emitidas | Uteis | Tardias | Erro HTTP | Corpo invalido | Transporte | Nao emitidas | Perda | complete/stale/unknown | HTTP p50/p95/p99/max (ms) | Desde a programacao p50/p95/p99/max (ms) | Taxa (req/s): alcançada no cenário; por rota, a programada | Gerador | Resultado |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---:|---|---|
 | L1 rep. 1 | account | 3000 | 3000 | 3000 | 0 | 0 | 0 | 0 | 0 | 0.00% | 3000/0/0 | 9.3/14.3/20.9/65.4 | 14.7/23.0/30.8/76.8 | 50.00 | valido | Approved |
 | L1 rep. 2 | account | 3000 | 3000 | 3000 | 0 | 0 | 0 | 0 | 0 | 0.00% | 3000/0/0 | 8.6/12.6/17.4/25.7 | 14.0/22.1/26.8/54.9 | 50.01 | valido | Approved |
 | L2 rep. 1 | customer | 3000 | 3000 | 3000 | 0 | 0 | 0 | 0 | 0 | 0.00% | 3000/0/0 | 8.4/11.8/15.6/31.8 | 13.8/21.5/26.3/48.0 | 49.99 | valido | Approved |
 | L2 rep. 2 | customer | 3000 | 3000 | 3000 | 0 | 0 | 0 | 0 | 0 | 0.00% | 3000/0/0 | 8.4/12.1/16.1/26.8 | 13.9/21.6/25.6/33.5 | 50.00 | valido | Approved |
-| L3 rep. 1 | account | 2400 | 2400 | 2400 | 0 | 0 | 0 | 0 | 0 | 0.00% | 2382/18/0 | 9.7/14.0/17.1/63.0 | 14.9/23.2/26.8/68.6 | 50.01 | valido | Approved |
-| L3 rep. 1 | customer | 600 | 600 | 600 | 0 | 0 | 0 | 0 | 0 | 0.00% | 595/5/0 | 9.1/13.4/17.4/31.8 | 14.6/22.8/27.1/37.3 | 50.01 | valido | Approved |
+| L3 rep. 1 | account | 2400 | 2400 | 2400 | 0 | 0 | 0 | 0 | 0 | 0.00% | 2382/18/0 | 9.7/14.0/17.1/63.0 | 14.9/23.2/26.8/68.6 | ≈ 40 (programada) | valido | Approved |
+| L3 rep. 1 | customer | 600 | 600 | 600 | 0 | 0 | 0 | 0 | 0 | 0.00% | 595/5/0 | 9.1/13.4/17.4/31.8 | 14.6/22.8/27.1/37.3 | ≈ 10 (programada) | valido | Approved |
 | L3 rep. 1 | total | 3000 | 3000 | 3000 | 0 | 0 | 0 | 0 | 0 | 0.00% | 2977/23/0 | 9.6/14.0/17.3/63.0 | 14.9/23.1/26.8/68.6 | 50.01 | valido | Approved |
-| L3 rep. 2 | account | 2400 | 2400 | 2400 | 0 | 0 | 0 | 0 | 0 | 0.00% | 2377/23/0 | 9.6/14.1/18.9/44.2 | 15.0/23.2/26.7/52.2 | 50.01 | valido | Approved |
-| L3 rep. 2 | customer | 600 | 600 | 600 | 0 | 0 | 0 | 0 | 0 | 0.00% | 596/4/0 | 9.0/13.7/17.7/25.8 | 14.8/23.6/29.6/37.4 | 50.01 | valido | Approved |
+| L3 rep. 2 | account | 2400 | 2400 | 2400 | 0 | 0 | 0 | 0 | 0 | 0.00% | 2377/23/0 | 9.6/14.1/18.9/44.2 | 15.0/23.2/26.7/52.2 | ≈ 40 (programada) | valido | Approved |
+| L3 rep. 2 | customer | 600 | 600 | 600 | 0 | 0 | 0 | 0 | 0 | 0.00% | 596/4/0 | 9.0/13.7/17.7/25.8 | 14.8/23.6/29.6/37.4 | ≈ 10 (programada) | valido | Approved |
 | L3 rep. 2 | total | 3000 | 3000 | 3000 | 0 | 0 | 0 | 0 | 0 | 0.00% | 2973/27/0 | 9.5/14.0/18.9/44.2 | 14.9/23.2/27.4/52.2 | 50.01 | valido | Approved |
 
 ### Emissoes por segundo (GET) e por instancia (L3)
@@ -121,24 +121,84 @@ L1 e L2 comparam **cada corpo** com o oracle calculado em SQL na origem (agrega�
 
 ## 9. Como reproduzir sem o kit
 
-Pré-requisitos: .NET 10, Docker com dois PostgreSQL (`docker compose up -d`), solução compilada em Release. Use bancos descartáveis com o prefixo `ft_load_p08_` (a ferramenta recusa outros) e nunca os bancos de desenvolvimento.
+Pré-requisitos: .NET 10, Docker com os dois PostgreSQL do `docker-compose.yml` (`docker compose up -d --wait`), PowerShell 7. Os comandos rodam na raiz do repositório, **sem nenhum script fora dele**, e usam apenas bancos descartáveis com o prefixo `ft_load_p08_` (a ferramenta recusa outros e recusa hosts fora de loopback); nunca os bancos de desenvolvimento. A senha `<senha local>` é a credencial sintética de laboratório do `docker-compose.yml`. Este roteiro reproduz **L1**; no fim estão os acréscimos de L2, L3 e F08. A massa de 100.000 movimentos leva cerca de 27 minutos para chegar a `live` com um Worker (seção 3).
+
+**1. Compilar e criar os dois bancos descartáveis**
 
 ```powershell
 dotnet build FinancialTransactions.sln -c Release
-$o = 'Host=127.0.0.1;Port=15432;Database=ft_load_p08_demo_src;Username=ft;Password=<senha local>'
-$p = 'Host=127.0.0.1;Port=15433;Database=ft_load_p08_demo_cons;Username=ft;Password=<senha local>'
-# 1. crie os dois bancos vazios (psql) e aplique as migrations dos dois contextos
-dotnet ef database update --connection $o --context FinancialTransactionsDbContext --project src/FinancialTransactions.Infrastructure --startup-project src/FinancialTransactions.Api --configuration Release --no-build
-dotnet ef database update --connection $p --context ConsolidationDbContext --project src/FinancialTransactions.Consolidation --startup-project src/FinancialTransactions.Consolidation.Worker --configuration Release --no-build
-# 2. manifesto próprio (antes de tudo) e seed + validação independente
-'{"runId":"demo","originDatabase":"ft_load_p08_demo_src","projectionDatabase":"ft_load_p08_demo_cons","expectedSeedMovements":100000}' | Set-Content manifesto.json
-$env:FT_LOAD_ORIGIN_CONNECTION = $o; $env:FT_LOAD_PROJECTION_CONNECTION = $p
-dotnet tools/FinancialTransactions.LoadTest/bin/Release/net10.0/FinancialTransactions.LoadTest.dll --mode seed-consolidation --manifest manifesto.json --out ./saida-seed
-# 3. coordenador e um Worker até live (FT__ConnectionStrings__FinancialTransactions = $o, FT__ConnectionStrings__Consolidation = $p)
-dotnet src/FinancialTransactions.Consolidation.Worker/bin/Release/net10.0/FinancialTransactions.Consolidation.Worker.dll --backfill
-# subir o Worker (ASPNETCORE_URLS=http://127.0.0.1:5121) e a API do consolidado (…:5111) com a mesma FT__Auth__SigningKey; esperar fase live e zero pendentes
-# 4. ensaio L1 (use --scenario L2 ou L3; em L3 suba também a segunda API e o segundo Worker e a API de lançamentos em :5100)
-dotnet tools/FinancialTransactions.LoadTest/bin/Release/net10.0/FinancialTransactions.LoadTest.dll --mode consolidation-open --scenario L1 --arrival-rate 50 --duration 60 --warmup 10 --read-url http://127.0.0.1:5111 --manifest manifesto.json --out ./saida-l1
+dotnet tool restore
+$suffix = 'demo'
+$srcDb  = "ft_load_p08_${suffix}_src"
+$consDb = "ft_load_p08_${suffix}_cons"
+docker exec financialtransactions-postgres               psql -U ft -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE $srcDb"
+docker exec financialtransactions-consolidation-postgres psql -U ft -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE $consDb"
 ```
 
-A chave de assinatura (`FT__Auth__SigningKey`) é a mesma das APIs e fica só no ambiente. O código de saída da ferramenta é o veredito do ensaio (seção 2); o `resumo.json` traz as contagens por categoria, os percentis, as emissões por segundo e, em L3 e F08, a convergência e a reconciliação.
+**2. Connection strings, chave e migrations dos dois contextos**
+
+```powershell
+$o = "Host=127.0.0.1;Port=15432;Database=$srcDb;Username=ft;Password=<senha local>;Timeout=5;Command Timeout=15"
+$p = "Host=127.0.0.1;Port=15433;Database=$consDb;Username=ft;Password=<senha local>;Timeout=5;Command Timeout=15"
+$env:FT__Auth__SigningKey = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+
+dotnet ef database update --connection $o --context FinancialTransactionsDbContext --project src/FinancialTransactions.Infrastructure --startup-project src/FinancialTransactions.Api --configuration Release --no-build
+dotnet ef database update --connection $p --context ConsolidationDbContext --project src/FinancialTransactions.Consolidation --startup-project src/FinancialTransactions.Consolidation.Worker --configuration Release --no-build
+```
+
+**3. Manifesto próprio (gravado antes de tudo) e massa de 100.000 movimentos com a Outbox**
+
+```powershell
+@{ runId = $suffix; originDatabase = $srcDb; projectionDatabase = $consDb; expectedSeedMovements = 100000 } | ConvertTo-Json | Set-Content manifesto.json
+$env:FT_LOAD_ORIGIN_CONNECTION = $o
+$env:FT_LOAD_PROJECTION_CONNECTION = $p
+$tool = 'tools/FinancialTransactions.LoadTest/bin/Release/net10.0/FinancialTransactions.LoadTest.dll'
+dotnet $tool --mode seed-consolidation --manifest manifesto.json --out ./saida-seed
+```
+
+**4. Variáveis dos processos, coordenador, Worker e API do consolidado**
+
+```powershell
+$env:FT__ConnectionStrings__FinancialTransactions = $o   # origem
+$env:FT__ConnectionStrings__Consolidation         = $p   # projeção
+$bin = 'src/FinancialTransactions.Consolidation.Worker/bin/Release/net10.0/FinancialTransactions.Consolidation.Worker.dll'
+$api = 'src/FinancialTransactions.Consolidation.Api/bin/Release/net10.0/FinancialTransactions.Consolidation.Api.dll'
+
+dotnet $bin --backfill ; "coordenador rc=$LASTEXITCODE"      # 0 = ativado (ver README: códigos 2, 3, 4, 5)
+
+$env:ASPNETCORE_URLS = 'http://127.0.0.1:5121'
+$worker = Start-Process dotnet -ArgumentList $bin -PassThru -RedirectStandardOutput worker1.log -RedirectStandardError worker1.err
+$env:ASPNETCORE_URLS = 'http://127.0.0.1:5111'
+$capi = Start-Process dotnet -ArgumentList $api -PassThru -RedirectStandardOutput capi1.log -RedirectStandardError capi1.err
+Remove-Item Env:ASPNETCORE_URLS
+```
+
+**5. Esperar a fase `live` e a Outbox sem pendentes (`--status`)**
+
+```powershell
+do {
+    Start-Sleep -Seconds 30
+    $status = dotnet $bin --status | ConvertFrom-Json
+    "fase=$($status.projection.phase) pendentes=$($status.origin.pending) quarentena=$($status.origin.quarantined) processados=$($status.projection.processedEvents)"
+} until ($status.projection.phase -eq 'live' -and $status.origin.pending -eq 0)
+dotnet $bin --verify --mode live ; "verify rc=$LASTEXITCODE"   # 0 = coerente
+```
+
+Com 100.000 eventos e um Worker o laço acima leva cerca de 27 minutos. A API do consolidado responde `503 consolidation_not_ready` até a fase `live`.
+
+**6. Ensaio L1 (3.000 GET a 50/s, 60 s, mais 10 s de aquecimento)**
+
+```powershell
+dotnet $tool --mode consolidation-open --scenario L1 --arrival-rate 50 --duration 60 --warmup 10 --read-url http://127.0.0.1:5111 --manifest manifesto.json --out ./saida-l1
+"ensaio rc=$LASTEXITCODE"   # 0 somente se válido e aprovado; 10, 20, 30, 3, 1: ver a seção 2
+```
+
+**7. Limpeza (só o que este roteiro criou)**
+
+```powershell
+Stop-Process -Id $worker.Id, $capi.Id
+docker exec financialtransactions-postgres               psql -U ft -d postgres -c "DROP DATABASE $srcDb WITH (FORCE)"
+docker exec financialtransactions-consolidation-postgres psql -U ft -d postgres -c "DROP DATABASE $consDb WITH (FORCE)"
+```
+
+**Outros cenários.** L2: igual ao L1 com `--scenario L2`. L3 e F08 repetem os passos 1 a 5 e acrescentam: a API de lançamentos (`FT__ConnectionStrings__FinancialTransactions = $o`, `ASPNETCORE_URLS=http://127.0.0.1:5100`, mesma `FT__Auth__SigningKey`); em L3, um segundo Worker (`ASPNETCORE_URLS=http://127.0.0.1:5122`) e uma segunda API do consolidado (`http://127.0.0.1:5112`); e a ferramenta recebe `--read-url` duas vezes (5111 e 5112) e `--write-url http://127.0.0.1:5100` (L3: `--write-rate 10`). O F08 injeta a falha no meio da janela (encerrar um Worker, encerrar uma API ou parar o container da consolidação) e usa `--start-signal` para sincronizar; os três casos estão descritos na seção 4. O código de saída da ferramenta é o veredito do ensaio (seção 2); o `resumo.json` traz as contagens por categoria, os percentis, as emissões por segundo e, em L3 e F08, a convergência e a reconciliação.

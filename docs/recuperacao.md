@@ -9,7 +9,7 @@ Este documento descreve o que a parte B do ciclo P08 acrescenta ao consolidado d
 | Um comando de verificação que compara a projeção com os movimentos imutáveis da origem, por conta e dia, por identidade e por fechamento. | Prova de que todo evento novo da origem já chegou (a projeção é eventualmente consistente). |
 | Uma reconstrução em **banco novo ao lado do antigo**, com captura finita selada, replay idempotente, reconciliação do mesmo conjunto e promoção administrativa. | Reconstrução **online contínua** nem replay de uma geração por requisição. |
 | Compatível com os lançamentos disponíveis o tempo todo (a API de lançamentos nunca é pausada). | Troca **sem indisponibilidade das consultas**: os consumidores conhecidos ficam parados durante a operação e há uma janela entre desligar as APIs antigas e subir as novas. |
-| Uma promoção que **recusa** se houver consumidor ou API conhecidos conectados. | Alta disponibilidade de produção, orquestrador ou promoção automática (ciclo P09). |
+| Uma promoção que **recusa** se houver consumidor ou API conhecidos conectados. | Alta disponibilidade de produção, orquestrador ou promoção automática (a proposta de alta disponibilidade está em [alta-disponibilidade.md](alta-disponibilidade.md); nada dela é implementado). |
 | Um registro que impede usar de novo o banco antigo depois da promoção. | **Rollback transparente**: voltar ao banco antigo trocando a connection string não é seguro e é bloqueado. |
 
 ## 1. Verificação financeira (`--verify`)

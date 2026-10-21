@@ -25,18 +25,26 @@ Consolidado diário (ciclo P07; hipóteses do projeto, não do contratante, em [
 14. **Recuperação sem intervenção:** falhas transitórias e de ambiente não perdem nem duplicam eventos e entram em *backoff*; só defeito do próprio evento leva à quarentena (cinco tentativas).
 15. **Carga inicial (bootstrap) com a escrita ativa:** conjunto finito por identidade, capturado numa visão consistente, aplicado e reconciliado nos dois bancos antes de a API do consolidado responder.
 
-O estado da CI está na seção [CI](#ci). A matriz de cenários e a aplicabilidade de cada um estão em [docs/escopo.md](docs/escopo.md); o estado das adequações sugeridas, em [docs/verificacao.md](docs/verificacao.md).
+Recuperação e escala do consolidado (ciclo P08; execução local do executor em laboratório):
+
+16. **Várias instâncias do Worker:** reserva durável por evento (lease de 45 s com token); a soma continua protegida pelo marcador do destino.
+17. **Quarentena com reprocessamento administrativo** (`--list-quarantine`, `--requeue`, com dry-run, digest do plano e trilha) e **comando de status** (`--status`).
+18. **Verificação financeira independente** (`--verify`) e **reconstrução da projeção em banco paralelo** (`--rebuild`), com limites declarados em [docs/recuperacao.md](docs/recuperacao.md).
+19. **Ensaio do consolidado em chegadas abertas** (50 GET/s por 60 s, três cenários e a resiliência a falhas), em [docs/carga-consolidado.md](docs/carga-consolidado.md); vale para a máquina e a topologia do ensaio.
+
+O estado da CI está na seção [CI](#ci). A matriz de cenários e a aplicabilidade de cada um estão em [docs/escopo.md](docs/escopo.md); a verificação, em [Estado da verificação](#estado-da-verificação).
 
 ## O que não está implementado
 
-- cache e posição materializada (decisão registrada com condição de revisão em [docs/carga.md](docs/carga.md));
+- cache de resposta e saldo materializado para a **posição por instante** (`asOf`): ela continua derivada por soma no banco a cada consulta (decisão com condição de revisão em [docs/carga.md](docs/carga.md)). Isto **não** vale para o consolidado diário, que **é** uma projeção materializada, mantida por um Worker e eventualmente consistente (`freshness`);
 - correção ou estorno de movimentos;
 - abertura de contas e clientes por API (os cadastros vêm da migration);
 - broker de mensagens e publicação para consumidores externos (a Outbox serve só à consolidação interna; broker é alternativa documentada em [docs/arquitetura.md](docs/arquitetura.md), ADR-10);
-- **ensaio dos 50 req/s do consolidado (parte C do ciclo P08):** executado pelo executor em laboratório local, em chegadas abertas (L1, L2 e L3, duas repetições cada, e a resiliência F08 em três casos): ver [docs/carga-consolidado.md](docs/carga-consolidado.md). Os 50 req/s e os 5% são **requisito obrigatório** das orientações complementares; o prazo de 1.000 ms, a janela de 60 s, a massa de 100.000 movimentos e os 120 s de convergência são **hipóteses de laboratório** do responsável do projeto (D3-P08), não requisitos do contratante. Os resultados valem para esta máquina e esta topologia (tudo no mesmo host), não para produção, e aguardam auditoria independente;
-- **reconstrução online contínua, troca sem indisponibilidade das consultas e retorno transparente ao banco antigo:** a reconstrução em banco paralelo (parte B) exige consumidores e APIs conhecidos parados e não oferece rollback (ver [docs/recuperacao.md](docs/recuperacao.md));
+- **reconstrução online contínua, troca sem indisponibilidade das consultas e retorno transparente ao banco antigo:** a reconstrução em banco paralelo exige consumidores e APIs conhecidos parados e não oferece rollback (ver [docs/recuperacao.md](docs/recuperacao.md)); a captura e o replay em 100.000 movimentos não foram medidos;
 - **purge da Outbox:** a retenção é só política (conservar) e medição do crescimento; nada é apagado automaticamente (ver [docs/arquitetura.md](docs/arquitetura.md), ADR-14);
-- arquitetura de alta disponibilidade (pontos de falha, recuperação, escala horizontal).
+- **alta disponibilidade de produção** (balanceador, réplicas, failover, zonas distintas, cofre de segredos): **apenas proposta**, em [docs/alta-disponibilidade.md](docs/alta-disponibilidade.md), com os pontos únicos de falha da versão atual. A topologia local roda num único host e não é alta disponibilidade.
+
+Os 50 req/s com no máximo 5% de perda são **requisito obrigatório** das orientações complementares; o prazo de 1.000 ms, a janela de 60 s, a massa de 100.000 movimentos e os 120 s de convergência do ensaio são **hipóteses de laboratório** do responsável do projeto (D3-P08), não requisitos do contratante.
 
 Propostas de evolução ficam separadas do que está implementado, em [docs/arquitetura.md](docs/arquitetura.md).
 
@@ -97,11 +105,14 @@ User-secrets só são lidos no ambiente `Development` (perfil `http` do `dotnet 
 
 ```powershell
 dotnet tool restore
-# Origem: InitialSchema (com o seed) e AddConsolidationOutbox (Outbox e registro de controle da captura)
+# Origem: aplica as migrations pendentes - InitialSchema (com o seed), AddConsolidationOutbox (Outbox e registro de controle da captura),
+# AddOutboxLeaseAndAdminTrail (reserva e trilha administrativa) e AddProjectionRegistry (projeção ativa depois de uma promoção)
 dotnet ef database update --context FinancialTransactionsDbContext --project src/FinancialTransactions.Infrastructure --startup-project src/FinancialTransactions.Api
-# Projeção: ConsolidationSchema
+# Projeção: ConsolidationSchema e AddRebuildRecovery (recuperação da reconstrução)
 dotnet ef database update --context ConsolidationDbContext --project src/FinancialTransactions.Consolidation --startup-project src/FinancialTransactions.Consolidation.Worker
 ```
+
+Os dois comandos aplicam **todas** as migrations pendentes no seu ambiente; num banco novo, o resultado é o esquema completo. As migrations mais recentes (`AddOutboxLeaseAndAdminTrail`, `AddProjectionRegistry` e `AddRebuildRecovery`) só existem no seu banco depois destes comandos: nenhum processo aplica migration na inicialização, e um banco criado antes delas não as tem.
 
 A migration `InitialSchema` cria `customers`, `accounts` e `movements` e semeia dois clientes e três contas (nenhum movimento, nenhum dado pessoal):
 
@@ -339,7 +350,7 @@ Resultado esperado nesta versão: **220 testes de unidade e 145 de integração 
 
 ## Ensaio de carga
 
-> **Escopo desta evidência.** O ensaio abaixo e os números de [docs/carga.md](docs/carga.md) são do ciclo P04 (commit `4463e38`), feitos contra a API de lançamentos **antes** da Outbox e dos processos do consolidado. Não medem o consolidado diário nem o POST com a segunda escrita, e não devem ser lidos como medição de P07. O ensaio dos 50 req/s do consolidado continua pendente (parte C do ciclo P08).
+> **Escopo desta evidência.** O ensaio abaixo e os números de [docs/carga.md](docs/carga.md) são do ciclo P04 (commit `4463e38`), feitos contra a API de lançamentos **antes** da Outbox e dos processos do consolidado. Não medem o consolidado diário nem o POST com a segunda escrita. O ensaio do consolidado (50 req/s) é outro e está na seção seguinte.
 
 Ferramenta de console em `tools/FinancialTransactions.LoadTest` e pré-carga em `tools/FinancialTransactions.LoadTest/seed_load.sql`. O ensaio roda contra a API real e um banco descartável `ft_load_<n>` (nunca o de desenvolvimento), com 200 clientes, 400 contas e 100.000 movimentos pré-carregados, 32 trabalhadores, 10 s de aquecimento e 60 s medidos, e termina com uma reconciliação do banco contra o que a ferramenta registrou como aceito. Resultados, ambiente, planos de consulta e limites: [docs/carga.md](docs/carga.md).
 
@@ -364,6 +375,11 @@ O requisito de **50 req/s com no máximo 5% de perda** ao consolidado diário fo
 # Gerador: 3.000 GET a 50/s em 60 s contra uma API do consolidado (banco próprio ft_load_p08_*, manifesto próprio gravado antes)
 dotnet tools/FinancialTransactions.LoadTest/bin/Release/net10.0/FinancialTransactions.LoadTest.dll --mode consolidation-open --scenario L1 --arrival-rate 50 --duration 60 --warmup 10 --read-url http://127.0.0.1:5111 --manifest manifesto.json --out ./saida-l1
 ```
+
+## Estado da verificação
+
+O que foi verificado, por quem, quando e o que **não** foi (pendências e limites) está em [docs/verificacao.md](docs/verificacao.md): a matriz final dos cinco apontamentos, as pendências vigentes e o portão de aceitação da versão final. Os estados são distintos: implementado, executado pelo executor em laboratório, reproduzido por uma segunda parte, executado na CI, proposto. A alta disponibilidade é uma **proposta** ([docs/alta-disponibilidade.md](docs/alta-disponibilidade.md)).
+
 ## CI
 
 O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) (nome `ci`) roda em `push` na `main` e em `pull_request`. Ele usa `ubuntu-latest` com **dois** serviços `postgres:17` (origem em `15432` e consolidação em `15433`, a mesma credencial sintética do `docker-compose.yml`, sem nenhum segredo, ambos com `POSTGRES_DB=postgres` e sonda `pg_isready -U ft -d postgres`), SDK .NET 10.0.x e executa:
@@ -372,12 +388,7 @@ O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) (nome `ci`) roda
 - `dotnet build FinancialTransactions.sln -c Release --no-restore --no-incremental -warnaserror`;
 - `dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vstest.runsettings`, com `FT_TEST_ADMIN_CONNECTION` e `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION` apontando para os serviços.
 
-**Estado verificado (fonte: CI, consulta à API pública do GitHub em 19/10/2026):** para o commit `abcdf19c073dc95505010a593126248dc2bcc79a` há uma execução, o [run 39201091893](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39201091893) (número 3, tentativa 1, evento `push`, 19/10/2026 04:45 UTC), job `build-and-test` (id 117894019834), com conclusão `success`. Segundo a governança do projeto em 19/10/2026, o workflow também executou com sucesso nos commits `fe545e9` e `ccf7bc7` (não reconferidos na consulta feita para esta documentação). Os contadores do log do run de `abcdf19` (Ubuntu 24.04.5, SDK 10.0.402, PostgreSQL 17.11, 92 testes de unidade e 45 de integração aprovados) foram **lidos pelo auditor-master** em 19/10/2026; a API consultada não os devolve.
-
-O restore e o build rodaram **sem diagnósticos de warning de compilação**. O log do workflow contém avisos de outra natureza (depreciação de módulo do Node, versão de Node declarada pelas actions e mensagens do serviço PostgreSQL sobre a sonda de saúde); estão registrados como pendências de manutenção do workflow em [docs/verificacao.md](docs/verificacao.md).
-
-**Estado desta versão (ciclo P07):** o workflow ganhou o segundo serviço PostgreSQL e a variável `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION`. Fonte: leitura do log da CI pelo auditor-master em 19/10/2026: para o commit `a055816243e29088f47c41d372f23178b4ae7512` há uma execução bem-sucedida, o [run 39321900737](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39321900737) (número 9, job 118297790062), com 173 testes de unidade e 98 de integração aprovados e build com zero warnings. A CI **não** executou a sondagem contra processos reais, as mutações, o ensaio de carga nem o roteiro deste README. Para o commit `4f0f10e6d187a2921a906fb129a7d1cb50eed5ce` (publicação da parte A do ciclo P08) o auditor leu, na noite de 19/10/2026 (fuso −03), o [run 39345385454](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39345385454) (número 11, tentativa 1, job 118376609399, `completed/success`): build Release de 11 assemblies sem warnings, 193 testes de unidade e 115 de integração aprovados; leitura histórica do auditor, que não cobre a sondagem, as mutações nem o lote complementar posterior. Para o commit `c7cdec1c0d92592416d3e4738677d4a5fa500199` (que contém a correção da seção 9.7 de [docs/verificacao.md](docs/verificacao.md)), o auditor leu em 19/10/2026 o [run 39329327946](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39329327946) (número 10, tentativa 1, job 118323234355, `completed/success`): build Release de 11 assemblies sem warnings e 173 + 100 testes aprovados. **Leitura histórica do auditor deste SHA**: a CI não executa as alterações posteriores (ciclo P08), que terão a sua própria execução depois de publicadas. Os testes do consolidado têm esperas de tempo real e rodam em runner compartilhado: uma falha intermitente na CI seria registrada, não escondida.
-
+**Estado verificado (fonte: CI, consulta anônima à API pública do GitHub em 20/10/2026, feita para esta documentação):** para o commit `15a657fceb054650839fa945e1ade5a8eaaa31cb` (publicação da parte C do ciclo P08, baseline do ciclo P09) há uma execução, o [run 39510771565](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39510771565) (número 16, tentativa 1, evento `push`, criada em 20/10/2026 22:48:46 UTC), job `build-and-test` (id 118930935468), com `status` `completed` e conclusão `success`; as etapas de restore, build e teste constam como `success`. A API consultada não devolve o conteúdo do log, então os contadores de testes desse run **não foram lidos**. Este é um **fato histórico desse commit**: esta documentação não afirma nada sobre a CI dos commits seguintes, que têm a execução própria na página de Actions do repositório. O histórico dos runs anteriores, com os contadores que um auditor leu nos logs, está em [docs/verificacao.md](docs/verificacao.md), seções 5, 9.3 e 10.4.
 O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício do banco, limite de corpo contra Kestrel real) nem o roteiro deste README, e não publica relatórios de teste. A execução vale para o commit indicado; commits posteriores têm a sua própria execução na página de Actions do repositório.
 
 ## Dados sintéticos e proteção
@@ -409,14 +420,16 @@ O workflow **não** executa o ensaio de carga, as sondagens manuais (reinício d
 - [docs/escopo.md](docs/escopo.md): fontes e procedência, hipóteses H1 a H15, contrato do consolidado diário, decisões por ciclo e matriz de cenários T01 a T16.
 - [docs/arquitetura.md](docs/arquitetura.md): componentes, fluxos, modelo, decisões (ADRs curtas), segurança e evoluções propostas (não implementadas).
 - [docs/verificacao.md](docs/verificacao.md): requisito → implementação → teste, comandos e resultados datados com a fonte de cada um, ambiente, pendências, checklist de entrega e o estado das adequações sugeridas.
-- [docs/carga.md](docs/carga.md): ensaio de carga, reconciliação e planos das consultas.
+- [docs/carga.md](docs/carga.md): ensaio de carga do ciclo P04 (API de lançamentos), reconciliação e planos das consultas.
+- [docs/carga-consolidado.md](docs/carga-consolidado.md): ensaio do consolidado diário em chegadas abertas (50 GET/s, perda de até 5%), resiliência a falhas e como reproduzir.
 - [docs/recuperacao.md](docs/recuperacao.md): verificação financeira somente leitura e reconstrução da projeção em banco paralelo, com seus limites.
+- [docs/alta-disponibilidade.md](docs/alta-disponibilidade.md): topologia atual, pontos únicos de falha, recuperação por componente, arquitetura de alta disponibilidade **proposta** (não implementada), escala horizontal e a tabela de evidências.
 
 ## Limites
 
 - **Verificação local:** os testes e o ensaio rodaram em ambiente de desenvolvimento (Windows, Docker Desktop, API, ferramenta e banco na mesma máquina). A CI cobre build e testes em Linux, não o ensaio de carga nem as sondagens manuais.
 - **Carga:** os números de [docs/carga.md](docs/carga.md) são de requisições mistas em laço fechado com 32 trabalhadores; não são capacidade máxima, não são transações financeiras por segundo e não valem para produção. A reconciliação não encontrou divergências nas execuções registradas; não foram realizados controles negativos por adulteração para validar integralmente a capacidade de detecção do reconciliador.
-- **Consolidado diário:** é eventualmente consistente e diz o quanto (`freshness`). Com reserva durável, várias instâncias do Worker podem consumir a mesma Outbox (lease de 45 s por evento, um evento em voo por instância); a deduplicação financeira continua no destino (`processed_events`) e a reserva não elimina toda execução sobreposta. Duas instâncias no mesmo host demonstram o mecanismo, não alta disponibilidade de produção. O prazo de resposta de falha (≤ 2 s) é hipótese do projeto, exercitada só para conexão recusada. A API do consolidado depende da origem para autorizar (titularidade da conta). Não foi feito ensaio de carga do consolidado (50 req/s com no máximo 5% de perda é requisito das orientações complementares; o ensaio específico do consolidado está **pendente** (parte C do ciclo P08) e nada foi demonstrado). O dia de negócio usa os dados de fuso da máquina. As adequações sugeridas e o que falta de cada uma estão em [docs/verificacao.md](docs/verificacao.md).
+- **Consolidado diário:** é eventualmente consistente e diz o quanto (`freshness`). Com reserva durável, várias instâncias do Worker podem consumir a mesma Outbox (lease de 45 s por evento, um evento em voo por instância); a deduplicação financeira continua no destino (`processed_events`) e a reserva não elimina toda execução sobreposta. Duas instâncias no mesmo host demonstram o mecanismo, não alta disponibilidade de produção. O prazo de resposta de falha (≤ 2 s) é hipótese do projeto, exercitada só para conexão recusada. A API do consolidado depende da origem para autorizar (titularidade da conta). O ensaio de 50 req/s do consolidado (requisito das orientações complementares) foi feito em laboratório, numa máquina só, com critérios que são hipóteses do projeto ([docs/carga-consolidado.md](docs/carga-consolidado.md)); não vale para produção. A reconstrução da projeção em 100.000 movimentos não foi medida. O dia de negócio usa os dados de fuso da máquina. As adequações sugeridas e o que falta de cada uma estão em [docs/verificacao.md](docs/verificacao.md).
 - **Sistema de registro:** não autoriza nem limita saldo; um débito é registrado mesmo que o saldo fique negativo (H1). Não há correção nem estorno.
 - **Tempo:** a posição reflete o conhecimento atual; não há consulta "como se sabia em T2" (H9). `registeredAt` é o instante em que o servidor montou o registro, não o do commit.
 - **Cadastros:** clientes e contas vêm da migration; não há API de cadastro.
