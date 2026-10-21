@@ -199,6 +199,13 @@ dotnet $tool --mode consolidation-open --scenario L1 --arrival-rate 50 --duratio
 Stop-Process -Id $worker.Id, $capi.Id
 docker exec financialtransactions-postgres               psql -U ft -d postgres -c "DROP DATABASE $srcDb WITH (FORCE)"
 docker exec financialtransactions-consolidation-postgres psql -U ft -d postgres -c "DROP DATABASE $consDb WITH (FORCE)"
+
+# Arquivos e pastas que os passos 3 a 6 criaram na raiz do repositório (o resultado do ensaio, em ./saida-l1, é apagado: copie-o antes se quiser guardá-lo)
+Remove-Item manifesto.json, worker1.log, worker1.err, capi1.log, capi1.err -ErrorAction SilentlyContinue
+Remove-Item saida-seed, saida-l1 -Recurse -ErrorAction SilentlyContinue
+
+# Variáveis de ambiente desta sessão (a chave e as connection strings)
+Remove-Item Env:FT__Auth__SigningKey, Env:FT__ConnectionStrings__FinancialTransactions, Env:FT__ConnectionStrings__Consolidation, Env:FT_LOAD_ORIGIN_CONNECTION, Env:FT_LOAD_PROJECTION_CONNECTION -ErrorAction SilentlyContinue
 ```
 
 **Outros cenários.** L2: igual ao L1 com `--scenario L2`. L3 e F08 repetem os passos 1 a 5 e acrescentam: a API de lançamentos (`FT__ConnectionStrings__FinancialTransactions = $o`, `ASPNETCORE_URLS=http://127.0.0.1:5100`, mesma `FT__Auth__SigningKey`); em L3, um segundo Worker (`ASPNETCORE_URLS=http://127.0.0.1:5122`) e uma segunda API do consolidado (`http://127.0.0.1:5112`); e a ferramenta recebe `--read-url` duas vezes (5111 e 5112) e `--write-url http://127.0.0.1:5100` (L3: `--write-rate 10`). O F08 injeta a falha no meio da janela (encerrar um Worker, encerrar uma API ou parar o container da consolidação) e usa `--start-signal` para sincronizar; os três casos estão descritos na seção 4. O código de saída da ferramenta é o veredito do ensaio (seção 2); o `resumo.json` traz as contagens por categoria, os percentis, as emissões por segundo e, em L3 e F08, a convergência e a reconciliação.

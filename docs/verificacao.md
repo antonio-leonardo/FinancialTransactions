@@ -20,10 +20,10 @@ Visão única, em 20/10/2026, sobre a baseline `15a657f` com a documentação do
 
 | Requisito e fonte | Implementação | Cenário e evidência | Resultado e responsável | Limite ou pendência |
 |---|---|---|---|---|
-| **Código em C#** (E, R1) | 11 projetos `net10.0` em `src/`, `tools/`, `tests/` | restore e build `-warnaserror` de 11 projetos (seção 15.3) | Executor, 20/10/2026, rc 0, 0 avisos. Governança: build reexecutado em P08 C (rc 0). Aceitação por checkout novo: só da versão A (seção 8) | A versão final será aceita na parte 2 do P09 (seção 8.9) |
-| **Testes automatizados** (E, R2) | `tests/` unidade e integração (xUnit, dois PostgreSQL reais) | 220 + 145 = 365 testes (seção 15.3) | Executor, 20/10/2026: 365 aprovados, 0 ignorados. Governança: 220 + 145 reexecutados em P08 C, 365 nomes iguais. **CI** (`15a657f`, run 16): `success`, contadores não lidos | Testes do consolidado têm esperas de tempo real; intermitência seria registrada. A CI não executa sondagens, mutações nem ensaios de carga |
-| **Repositório público no GitHub** (E, R3) | repositório público | consulta anônima à API e clone sem credencial na versão A (seção 8) | Executor, 19/10/2026, versão A. A versão final: a executar | About do repositório pendente (ação do responsável) |
-| **README com execução local** (E, R4) | `README.md` | passo a passo seguido num clone novo da versão A (seção 8.4) | Executor, 19/10/2026, versão A; roteiro do consolidado verificado por sondagem em P07 (seção 9.5) | `docker compose up` não exercitado a partir do clone; README final: a executar na aceitação final |
+| **Código em C#** (E, R1) | 11 projetos `net10.0` em `src/`, `tools/`, `tests/` | restore e build `-warnaserror` de 11 projetos (seção 15.3) | Executor, 20/10/2026, rc 0, 0 avisos. Governança: build reexecutado em P08 C (rc 0). Aceitação por checkout novo: versão A (seção 8) e versão final `5c3beb0` (seção 8.9, executor, 20/10/2026: `rc` 0, 11 projetos) | Reprodução da governança sobre a versão final pendente |
+| **Testes automatizados** (E, R2) | `tests/` unidade e integração (xUnit, dois PostgreSQL reais) | 220 + 145 = 365 testes (seção 15.3) | Executor, 20/10/2026: 365 aprovados, 0 ignorados. Governança: 220 + 145 reexecutados em P08 C, 365 nomes iguais. **CI** (`15a657f`, run 16; `5c3beb0`, run 17): `success`, contadores não lidos. Clone novo de `5c3beb0` (seção 8.9, executor, 20/10/2026): 220 + 145 aprovados, 0 ignorados | Testes do consolidado têm esperas de tempo real; intermitência seria registrada. A CI não executa sondagens, mutações nem ensaios de carga |
+| **Repositório público no GitHub** (E, R3) | repositório público | consulta anônima à API e clone sem credencial na versão A (seção 8) | Executor, 19/10/2026, versão A; versão final: `HEAD` do clone = `main` pública = `5c3beb0` (seção 8.9, 20/10/2026) | About do repositório pendente (ação do responsável); a descrição ainda é a original em 20/10/2026 |
+| **README com execução local** (E, R4) | `README.md` | passo a passo seguido num clone novo da versão A (seção 8.4) e da versão final (seção 8.9.2) | Executor, 19/10/2026, versão A; versão final `5c3beb0` (20/10/2026): README reproduzido no clone, 19 verificações, 0 divergentes (seção 8.9.2) | `docker compose up` não exercitado a partir de nenhum clone; reprodução da governança pendente |
 | **Documentação no repositório** (E, R5) | `README.md` e 7 documentos em `docs/` | verificador de links, âncoras e privacidade (seções 2.3 e 15.3) | Executor, 20/10/2026: 0 problemas. Governança: controle de reprodução e varredura sobre a Parte 1 (parecer de P09, privado) | Os 7 diagramas Mermaid só foram conferidos por leitura; renderização no GitHub pendente do responsável |
 | **Compila sem erros e sem avisos** (E, R6) | `Directory.Build.props` (`TreatWarningsAsErrors`) | build `-warnaserror` | Executor, 20/10/2026, rc 0. CI (`15a657f`): etapa Build `success` | Escopo: compilação, não qualidade |
 | **Registro de movimentações e posição por instante** (E, H1–H11) | API de lançamentos; posição por `SUM` no banco, sem saldo materializado | T01 a T14 (seção 1.2); ensaio do ciclo P04 (laço fechado, anterior à Outbox) | Executor e governança em P00–P05 (datas na seção 2.1); T09 não aplicável (H1) | Carga do P04 não vale para o POST atual (Outbox); sem correção nem estorno (T14 parcial) |
@@ -228,6 +228,20 @@ Fonte: *CI* (consulta anônima à API pública do GitHub, sem credencial, feita 
 
 Este registro é **histórico**: vale para o SHA `15a657f`. Os commits que contêm a documentação do ciclo P09 terão a execução própria deles, e esta documentação não afirma nada sobre ela.
 
+### 5.4 CI do SHA aceito do ciclo P09
+
+Fonte: *CI* (consulta anônima à API pública do GitHub, sem credencial, em 20/10/2026 às 22:21, UTC−03:00, isto é, 21/10/2026 01:21 UTC).
+
+| Item | Valor |
+|---|---|
+| SHA | `5c3beb0d564050640790ab04c31aac1b6f984f4f` (publicação da parte 1 do ciclo P09; é o SHA aceito na seção 8.9) |
+| Execuções para esse SHA | 1 (todas as execuções de todos os workflows): [run 39524995573](https://github.com/antonio-leonardo/FinancialTransactions/actions/runs/39524995573), número 17, tentativa 1, evento `push`, criada em 21/10/2026 01:02:54 UTC, `status` `completed`, `conclusion` `success` |
+| Job | `build-and-test` (id 118977434311), 01:02:57 a 01:05:37 UTC, `success`. Etapas `Run actions/checkout@v7`, `Run actions/setup-dotnet@v6`, Restore, Build e Test, todas `success` |
+| Artefatos | 0 |
+| O que a API não mostra | o conteúdo do log; os contadores de testes desse run **não foram lidos** (exigem credencial). Os contadores 220 + 145 desse SHA vêm do clone (seção 8.9), não da CI |
+
+A CI cobre restore, build `-warnaserror` e testes. Ela **não** executa as sondagens com processos reais, as mutações, os ensaios de carga nem o roteiro do README. O commit que registra esta aceitação é posterior e terá a execução própria dele, sobre a qual esta documentação nada afirma.
+
 ## 6. Verificações que não existem ou são parciais (pendências)
 
 | Item | Situação |
@@ -236,7 +250,7 @@ Este registro é **histórico**: vale para o SHA `15a657f`. Os commits que cont�
 | T14 | **Parcial**: reconciliação pós-carga executada; não há fluxo de correção ou estorno (fora de escopo). |
 | Reconciliação | A reconciliação da ferramenta de carga do ciclo P04 não encontrou divergências nas execuções registradas e **não** teve controles negativos por adulteração. O verificador independente do Worker (`--verify`) tem sete controles negativos (R09c, seção 11.1). |
 | Relógio nos testes | `TimeProvider` é injetado e resolvido como `TimeProvider.System`; a fixture de testes não oferece controle ou congelamento sistemático do tempo. |
-| Checkout novo | **Verificado em A** (seção 8): clone novo da URL pública em contexto sem credencial, roteiro de aceitação com `rc` 0 e passo a passo do README. Ressalva: o comando `docker compose up -d --wait` não foi exercitado a partir do clone (ver seção 8). **A versão final ainda não foi aceita por checkout novo**: é a segunda parte do ciclo P09 (portão da seção 8.9, com estado "a executar na aceitação final"). |
+| Checkout novo | **Verificado em A** (seção 8) e **na versão final** `5c3beb0` (seção 8.9, 20/10/2026): clone novo em contexto Git isolado, roteiro de aceitação com `rc` 0 (220 + 145), README reproduzido com `-SkipComposeUp`. Ressalva que continua: o `docker compose up -d --wait` não foi exercitado a partir de nenhum clone. A reprodução da aceitação final pela governança está pendente. |
 | Diagramas Mermaid | Conferidos por leitura; **renderização no GitHub: pendente de confirmação visual do responsável do projeto** (não informada até esta aceitação). Em P07 foram acrescentados três diagramas (componentes, sequência do consolidado e estados do bootstrap) e no ciclo P09 dois diagramas `flowchart` em [alta-disponibilidade.md](alta-disponibilidade.md) (topologia atual e arquitetura proposta): são 7 no total, todos só conferidos por leitura e pela palavra inicial do bloco. |
 | `GOV-P04-CI-01` | **Aplicada e executada com sucesso** (seção 5.2). O desaparecimento da mensagem sobre a base `ft` está registrado por leitura de terceiro de um run de árvore idêntica; o log do run de A não foi lido. |
 | `GOV-P04-CI-02` | **Aplicada e executada com sucesso** para as duas actions (`checkout@v7`, `setup-dotnet@v6`; seção 5.2). |
@@ -252,7 +266,7 @@ Este registro é **histórico**: vale para o SHA `15a657f`. Os commits que cont�
 | Limites do ensaio de carga do consolidado (P08 C) | Máquina única (6 processadores lógicos); critérios de 1.000 ms, 60 s, 120 s e massa são hipóteses de laboratório (D3-P08); cada repetição parte de um par de bancos clonado de um par que passou pelo bootstrap real (desvio declarado); F08 com uma execução por caso; os 6 a 8 primeiros POST da janela foram lentos (até ~1,7 s), causa provável partida a frio, **não investigada**; o modo "aceita e não responde" da dependência não foi exercitado. |
 | Migrations de P08 nos bancos de desenvolvimento | `AddOutboxLeaseAndAdminTrail`, `AddProjectionRegistry` e `AddRebuildRecovery` **não** foram aplicadas nos bancos de desenvolvimento do autor; `dotnet ef database update` as aplica no ambiente de quem executa o README. |
 | Fuso anterior a 2004 | Medido em 19/10/2026 (473.329 instantes de 2000 a 2026): o .NET desta máquina (Windows) e o PostgreSQL concordam de 2004 a 2026 e divergem em 212 instantes de 2000 a 2003. Faixa fora do uso (as contas abrem em 2026; H5). O runner Linux da CI usa o `tzdata` do IANA e esse caso **não foi verificado** (ADR-12). |
-| CI da versão final | Esta documentação não afirma nada sobre a CI dos commits do ciclo P09. O último fato histórico é o run 16 do SHA `15a657f` (seção 5.3), cujos contadores de teste não foram lidos. |
+| CI da versão final | `5c3beb0` (aceito): run 17, `completed/success` (seção 5.4), contadores de teste não lidos. O commit que registra a aceitação é posterior; esta documentação não afirma nada sobre a CI dele. |
 
 ## 7. Checklist de entrega
 
@@ -271,15 +285,14 @@ Todos os estados desta seção se referem à versão A (commit `87645ed9e3ed5732
 
 ### 7.1 Checklist da versão final (ciclo P09)
 
-A versão final é o commit que contém a documentação do ciclo P09. Cada linha só passa a "executado e aprovado" com o resultado de um **clone novo** dessa versão publicada, feito na segunda parte do ciclo; até lá o estado é o da coluna.
+A versão final é o commit `5c3beb0d564050640790ab04c31aac1b6f984f4f`, que contém a documentação do ciclo P09 (parte 1). Os estados abaixo vêm de um **clone novo** dessa versão publicada, feito em 20/10/2026 pelo executor; a reprodução independente da governança está **pendente**. O commit que registra esta tabela é posterior e só altera `docs/verificacao.md`, o README e a correção de limpeza em `docs/carga-consolidado.md`.
 
-| Item obrigatório | Estado | Evidência esperada |
+| Item obrigatório | Estado | Evidência |
 |---|---|---|
-| Implementação em C# e build sem erros e sem avisos | a executar na aceitação final | restore e build `-warnaserror` do roteiro de aceitação no clone, `rc` 0, 11 projetos |
-| Testes automatizados | a executar na aceitação final | TRX novos do clone: ao menos 220 de unidade e 145 de integração executados e aprovados, 0 ignorados |
-| README executável sem o kit | a executar na aceitação final | passo a passo do README seguido no clone, em bancos descartáveis próprios: migrations dos dois contextos, coordenador, Worker, API do consolidado, `--status` e `--verify`, com status e campos-chave de cada chamada |
-| Repositório público, documentação no repositório | a executar na aceitação final | `HEAD` do clone igual à `refs/heads/main` pública; verificador de links e privacidade sobre os documentos do clone |
-
+| Implementação em C# e build sem erros e sem avisos | **executado pelo executor; reprodução da governança pendente** | restore e build `-warnaserror` da solução e de cada um dos 11 projetos no clone, `rc` 0 (seção 8.9) |
+| Testes automatizados | **executado pelo executor; reprodução da governança pendente** | TRX novos do clone: 220 de unidade e 145 de integração executados e aprovados, 0 ignorados; CI do SHA: etapa Test `success` (seção 5.4) |
+| README executável sem o kit | **executado pelo executor; reprodução da governança pendente** | passo a passo do README no clone, em dois bancos descartáveis próprios: migrations dos dois contextos, API de lançamentos, coordenador, Worker, API do consolidado, consolidado por conta e por cliente, `--status` e `--verify`; 19 verificações, 0 divergentes. `docker compose up` não exercitado |
+| Repositório público, documentação no repositório | **executado pelo executor; reprodução da governança pendente** | `HEAD` do clone = `refs/heads/main` pública = `5c3beb0`; verificador de links e privacidade sobre os 8 documentos do clone: 0 problemas, 0 ocorrências |
 Conferência já feita **nesta árvore de trabalho** (não é a aceitação): build `-warnaserror` com `rc` 0 e uma rodada de testes, verificador de links e privacidade, varredura de nomes; resultados na seção 15.3.
 
 ## 8. Portão de aceitação
@@ -366,19 +379,32 @@ Prova: que, em checkout limpo da versão pública, todos os projetos inventariad
 
 ### 8.9 Portão de aceitação da versão final (ciclo P09)
 
-Modelo de fechamento para a **versão final**, em redação própria, a ser preenchido com os resultados do clone novo na segunda parte do ciclo. Nenhum resultado é afirmado aqui antes da execução. Quando for preenchido, ele deve dizer a que SHA se refere (o SHA aceito) e que o commit que o registra é posterior e só altera esta seção e o README.
+Fechamento da **versão final**, em redação própria, preenchido em 20/10/2026 com os resultados do clone novo. **Refere-se ao SHA aceito `5c3beb0d564050640790ab04c31aac1b6f984f4f`.** O commit que registra este portão é posterior e só altera `docs/verificacao.md`, o README e, por uma correção de texto da limpeza do roteiro, `docs/carga-consolidado.md`; nenhum código de produto ou teste muda nele. Fonte: *executor local* (esta aceitação), mais a *CI* onde indicado. A saída zero do roteiro de aceitação não é aprovação: `delivery` fica `PENDENTE_REVISAO_E_REPRODUCAO_INDEPENDENTE`.
 
 | Item | Critério que pode reprovar | Resultado no clone | Estado |
 |---|---|---|---|
-| Identidade | `HEAD` do clone diferente do SHA publicado, ou árvore suja antes ou depois | — | a executar na aceitação final |
-| Build | qualquer erro ou aviso em restore ou build `-warnaserror` da solução ou de um dos 11 projetos | — | a executar na aceitação final |
-| Testes | menos de 220 de unidade ou de 145 de integração executados, algum reprovado ou ignorado, TRX reaproveitado | — | a executar na aceitação final |
-| README | etapa do passo a passo que falhe ou que dependa de algo fora do repositório | — | a executar na aceitação final |
-| Histórico | segredo, caminho pessoal, nome, empresa ou processo em qualquer revisão; autoria não uniforme | — | a executar na aceitação final |
-| CI | `conclusion` diferente de `success` para o SHA aceito (consulta à API pública, com o id do run) | — | a executar na aceitação final |
+| Identidade | `HEAD` do clone diferente do SHA publicado, ou árvore suja antes ou depois | `ls-remote` em contexto isolado e API pública: `main` = `5c3beb0`; `HEAD` do clone = `5c3beb0`; árvore limpa antes e depois (também depois do README) | executado pelo executor; reprodução da governança pendente |
+| Build | qualquer erro ou aviso em restore ou build `-warnaserror` da solução ou de um dos 11 projetos | `Verificar-Entrega.ps1` (SHA-256 `eabc1b84…5070`, inalterado), `rc` 0, 192 s: restore, build da solução e dos 11 projetos, todos `rc` 0 | executado pelo executor; reprodução da governança pendente |
+| Testes | menos de 220 de unidade ou de 145 de integração executados, algum reprovado ou ignorado, TRX reaproveitado | TRX novos: unidade 220/220/220 e integração 145/145/145 (total, executados, aprovados); falhos, erro, tempo esgotado, abortados, inconclusivos e não executados: 0 | executado pelo executor; reprodução da governança pendente |
+| README | etapa do passo a passo que falhe ou que dependa de algo fora do repositório | 19 verificações, 0 divergentes, `rc` 0, 67 s (seção 8.9.2) | executado pelo executor; reprodução da governança pendente |
+| Histórico | segredo, caminho pessoal, nome, empresa ou processo em qualquer revisão; autoria não uniforme | 20 revisões varridas: nenhum JWT, chave privada, token de provedor, caminho pessoal, referência a material privado, nome, empresa ou processo (seção 8.9.3); autoria uniforme em 20 de 20 commits | executado pelo executor; reprodução da governança pendente |
+| CI | `conclusion` diferente de `success` para o SHA aceito (consulta à API pública, com o id do run) | run 39524995573 (número 17), `completed/success`, job 118977434311 (seção 5.4) | executado na CI; contadores de teste não lidos |
 
-Limites que o portão já declara: o `docker compose up` não será exercitado a partir do clone (o `container_name` e as portas conflitam com os containers do projeto); o About do repositório e a renderização dos diagramas dependem do responsável do projeto.
+#### 8.9.1 Execução do roteiro de aceitação
 
+`Verificar-Entrega.ps1` em processo filho com `-ExecutionPolicy Bypass` **só nele** e `TEMP`/`TMP` apontando para pasta própria, sobre o clone, com o inventário de 11 projetos (`Domain`, `Infrastructure`, `Api`, `Auth`, `Consolidation`, `Consolidation.Worker`, `Consolidation.Api`, `DevToken`, `LoadTest`, `UnitTests`, `IntegrationTests`), 10 arquivos obrigatórios (os 7 anteriores mais `docs/recuperacao.md`, `docs/carga-consolidado.md` e `docs/alta-disponibilidade.md`) e mínimos 220 e 145. O clone foi feito por `Git-Isolado.ps1` (diretório neutro, variáveis `GIT_*`/`GCM_*` tratadas só no filho, diagnóstico de configuração com 0 entradas antes da rede, clone com 10 entradas locais esperadas e URL sem credencial; nenhuma credencial pedida nem fornecida). Os dois containers do projeto estavam `healthy` para os testes de integração, com os bancos descartáveis `ft_test_*` e `ft_cons_test_*` criados e removidos pelos próprios testes. `resultado.json`: `technicalChecks` `CONCLUIDAS_NO_ESCOPO_DECLARADO`, `delivery` `PENDENTE_REVISAO_E_REPRODUCAO_INDEPENDENTE`, como esperado.
+
+#### 8.9.2 README reproduzido no clone
+
+Dois bancos descartáveis próprios (`ft_doc_*`, origem e projeção), criados e removidos pela execução; processos em portas livres (5100, 5110 e 5120) e encerrados pelos PID registrados; chave e token só em memória. Os bancos de desenvolvimento não foram tocados (mesmas migrations e contagens antes e depois). Passos: migrations dos dois contextos (as 4 da origem e as 2 da projeção aplicadas), API de lançamentos, token, crédito de 100,00 e débito de 40,00, posição por instante, repetição (`200`) e conflito (`422`), coordenador `--backfill` (`rc` 0, repetido `rc` 0), Worker até `live` com 2 membros no conjunto inicial, API do consolidado, consolidado da conta e do cliente em 01/09/2026 (créditos 100, débitos 40, líquido 60, 2 movimentos, `freshness` `complete`), um novo crédito depois de `live` aplicado pelo Worker (créditos 110, líquido 70, 3 movimentos), `--status` (`pending` 0, `quarantined` 0, 3 linhas na Outbox, `processedEvents` 3) e `--verify` nos modos `live` e `convergence` (`rc` 0). **Adaptação declarada:** o `docker compose up -d --wait` não foi exercitado a partir do clone (o `container_name` e as portas conflitam com os containers do projeto); verificou-se que o `docker-compose.yml` do clone tem o mesmo blob Git que o da solução e que os dois containers estavam `healthy`. Uma primeira execução do auxiliar parou antes de qualquer recurso por comparar o arquivo por SHA-256 em vez de pelo blob (a cópia de trabalho do clone tem fins de linha CRLF); o auxiliar foi corrigido e a execução refeita do zero.
+
+#### 8.9.3 Revisão do histórico publicado
+
+20 revisões enumeradas (`rev-list --all`, `rc` 0; primeira `605e3da`), cada uma varrida com cada padrão (`git grep -n -I -E`, uma revisão e um padrão por vez; `rc` 0 = ocorrência, 1 = nenhuma, outro = erro; nenhum erro). Prova de ausência: um padrão sabidamente inexistente devolveu `rc` 1 nas 20 revisões. JWT, chave privada, token de provedor, caminho pessoal e referência a material privado: `rc` 1 em 20 de 20. As ocorrências de `Password=` (179 linhas) e de `SigningKey` (16 linhas) foram classificadas: `ft_local_dev_only` (credencial sintética de laboratório), `Password=x`, `Password=p` e `Password=segredo` (literais inventados em testes de sanitização e de configuração), menções textuais nos documentos e o único literal sintético de `SigningKey` de um teste negativo de logs. **Prova positiva:** `ft_local_dev_only` em `docker-compose.yml` do commit inicial (`rc` 0) e em 20 de 20 revisões; o padrão original `Password=` continua sem ocorrência no commit inicial (a credencial está na sintaxe YAML `POSTGRES_PASSWORD:`), o que já estava registrado na seção 8.5. Varredura de nomes, empresa e processo em 20 revisões: 0. Autoria: 20 commits, 0 merges, um único nome e um único endereço de e-mail em autor e committer (80 de 80 campos, um domínio); mensagens só com assunto. **Não verificado:** commits antigos podem continuar acessíveis por SHA no cache do GitHub; o log da CI não foi lido; o About do repositório continua com a descrição original (pendente, ação do responsável).
+
+#### 8.9.4 O que esta aceitação não prova
+
+Não prova a classificação humana dos projetos no inventário, a qualidade das asserções, o funcionamento fora do ambiente de teste, a renderização dos 7 diagramas (só conferidos por leitura), a ausência de conteúdo reproduzido de fontes externas (conferência humana, da governança), nem a segurança ou a alta disponibilidade de produção (que é uma proposta, [alta-disponibilidade.md](alta-disponibilidade.md)). Controles negativos do roteiro não foram repetidos nesta aceitação; valem os da versão A (seção 8.6), porque o script de aceitação não mudou (mesmo SHA-256).
 ## 9. Ciclo P07: consolidado diário independente
 
 > As seções 9 a 14 são o registro de cada ciclo **na data dele**. Onde dizem "pendente", "não executado" ou "P09", o estado atual está nas seções 6 e 15.
@@ -750,3 +776,7 @@ Fonte: *esta tentativa* (executor), 20/10/2026, sobre a baseline `15a657f` com a
 Uma única rodada de testes é suficiente aqui porque nada de código mudou: a rodada prova que a árvore compila e que a suíte continua inteira, não que o código é estável.
 
 **Complemento (v1.1 do prompt), 20/10/2026.** Depois do parecer da governança sobre a parte 1 foram acrescentados a matriz de modos de falha e a política de dados (`alta-disponibilidade.md`), a seção 0 e as notas datadas (este documento), a distinção posição por instante × consolidado materializado (README) e os comandos completos e a taxa por rota (`carga-consolidado.md`). Repetidos sobre a árvore resultante: restore e build `-warnaserror` `rc` 0 (0 avisos, 0 erros), verificador 0 problemas e 0 ocorrências de privacidade, varredura de nomes sem ocorrência nova. **Sem nova rodada de testes**: nada de código mudou desde a rodada de 220 + 145 acima. Os comandos de reprodução de `carga-consolidado.md` foram escritos a partir do código e dos documentos e **não foram reexecutados** nesta etapa.
+
+### 15.4 Parte 2: aceitação por checkout novo
+
+A parte 2 foi executada em 20/10/2026 sobre o SHA publicado 5c3beb0 e está registrada nas seções 5.4, 7.1 e 8.9: roteiro de aceitação c 0 (220 + 145), README reproduzido no clone (19 verificações, 0 divergentes), histórico de 20 revisões varrido, autoria uniforme e CI do SHA success (run 17). O commit que registra esses resultados altera só docs/verificacao.md, o README e docs/carga-consolidado.md (correção do passo de limpeza do roteiro de reprodução, que apaga os arquivos e pastas que o roteiro cria na raiz do repositório). Nenhum código de produto e nenhum teste mudou.
