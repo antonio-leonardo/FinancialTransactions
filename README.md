@@ -1,5 +1,7 @@
 # FinancialTransactions
 
+Demonstração dos quatro pontos do retorno: [docs/demonstracao-independencia.md](docs/demonstracao-independencia.md).
+
 Sistema de registro de movimentações financeiras (créditos e débitos) em contas de clientes, com consulta da posição consolidada por conta e por cliente em um instante (`asOf`) e **consolidado diário** por conta e por cliente. São **três processos** (API de lançamentos, Worker de consolidação e API do consolidado) e **dois bancos PostgreSQL**: o registro de lançamentos não depende de nada do consolidado. ASP.NET Core (Minimal APIs), EF Core, idempotência por chave e autenticação JWT local. O escopo e as hipóteses estão em [docs/escopo.md](docs/escopo.md); os componentes e as decisões, em [docs/arquitetura.md](docs/arquitetura.md).
 
 ## O que está implementado
