@@ -2,6 +2,22 @@
 
 Demonstração dos quatro pontos do retorno: [docs/demonstracao-independencia.md](docs/demonstracao-independencia.md).
 
+## Comprovar independência e recuperação
+
+Pré-requisitos: Git, SDK .NET 10, Docker com Compose v2 e um shell (os exemplos usam PowerShell).
+
+```powershell
+git clone https://github.com/antonio-leonardo/FinancialTransactions.git
+cd FinancialTransactions
+docker compose up -d --wait
+dotnet build FinancialTransactions.sln -c Release -warnaserror
+dotnet test tests/FinancialTransactions.IntegrationTests/FinancialTransactions.IntegrationTests.csproj -c Release --no-build --settings tests/vstest.runsettings --filter "DisplayName~Demonstracao" --logger "console;verbosity=detailed"
+```
+
+Você verá os dois testes `Demonstracao_1_…` e `Demonstracao_2_…` passarem e imprimirem a tabela antes, durante e depois (consolidação interrompida, dez lançamentos novos aceitos e persistidos, retomada, saldos reconciliados, repetição sem efeito); a fixture cria e remove os seus próprios bancos e a sua chave, sem migration nem token manual. Para gravar o relatório, acrescente `--logger trx --results-directory <pasta>`.
+
+Os resultados de 50 req/s com perda máxima de 5% não são medidos por estes testes: estão em [docs/carga-consolidado.md](docs/carga-consolidado.md) (seção 5) e em [docs/demonstracao-independencia.md](docs/demonstracao-independencia.md) (seção 4), com o roteiro público de reprodução (seção 9 do primeiro). A suíte inteira (`dotnet test FinancialTransactions.sln …`) contém também os testes C1 a C5 e os do gerador de carga, que **não** são o ensaio real.
+
 Sistema de registro de movimentações financeiras (créditos e débitos) em contas de clientes, com consulta da posição consolidada por conta e por cliente em um instante (`asOf`) e **consolidado diário** por conta e por cliente. São **três processos** (API de lançamentos, Worker de consolidação e API do consolidado) e **dois bancos PostgreSQL**: o registro de lançamentos não depende de nada do consolidado. ASP.NET Core (Minimal APIs), EF Core, idempotência por chave e autenticação JWT local. O escopo e as hipóteses estão em [docs/escopo.md](docs/escopo.md); os componentes e as decisões, em [docs/arquitetura.md](docs/arquitetura.md).
 
 ## O que está implementado
@@ -348,7 +364,7 @@ dotnet test FinancialTransactions.sln -c Release --no-build --settings tests/vst
 
 Os testes de integração sobem a API de lançamentos real (`WebApplicationFactory`), o Worker e a API do consolidado (hosts reais, Kestrel em porta livre, no processo de teste) contra **dois** bancos PostgreSQL descartáveis por execução: `ft_test_<hex>` na origem e `ft_cons_test_<hex>` na consolidação, criados e migrados no início e removidos ao final. Os subcasos do bootstrap (C9a a C9h) usam um par de bancos próprio cada. Eles usam por padrão as conexões administrativas `Host=127.0.0.1;Port=15432;Database=postgres;Username=ft;Password=ft_local_dev_only` (origem, `FT_TEST_ADMIN_CONNECTION`) e `Host=127.0.0.1;Port=15433;Database=postgres;Username=ft;Password=ft_local_dev_only` (consolidação, `FT_TEST_CONSOLIDATION_ADMIN_CONNECTION`); para outros servidores, defina as variáveis. **Os dois containers precisam estar `healthy`** (`docker compose up -d --wait`). Os testes do consolidado esperam condições observáveis (consulta ao banco, eventos do consumidor) e usam intervalos reduzidos do laço; os de produção (500 ms, 2 s, backoff de 1 s a 30 s) são cobertos por teste de unidade. A chave JWT dos testes é gerada a cada execução. Para rodar só os testes de unidade (sem banco): `dotnet test tests/FinancialTransactions.UnitTests -c Release --no-build --settings tests/vstest.runsettings`.
 
-Resultado esperado nesta versão: **220 testes de unidade e 145 de integração (365)**, todos aprovados (fonte: *execução local* do executor, duas rodadas completas em 20/10/2026; a CI roda os mesmos comandos, mas só o que ela mesma executar pode ser atribuído a ela). Os 344 casos da versão anterior continuam presentes, pelo nome; os 21 novos são os controles do gerador de carga (`LoadGeneratorTests`).
+Resultado esperado nesta versão: **220 testes de unidade e 147 de integração (367)**, todos aprovados (fonte: *execução local* do executor, duas rodadas completas em 21/10/2026, depois de acrescentados os dois testes `Demonstracao_*`; as duas rodadas anteriores, de 20/10/2026, foram de 220 + 145 = 365; a CI roda os mesmos comandos, mas só o que ela mesma executar pode ser atribuído a ela). Os 344 casos da versão anterior continuam presentes, pelo nome; os 21 novos são os controles do gerador de carga (`LoadGeneratorTests`). Os 365 nomes continuam presentes e os 2 novos são `Demonstracao_1_…` e `Demonstracao_2_…`.
 
 ## Ensaio de carga
 

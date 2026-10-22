@@ -9,7 +9,7 @@ Este documento responde, com links para o código, um teste executado e resultad
 | 3 | Como o consolidado se recupera e volta a refletir os saldos depois da falha? | [Seção 3](#3-recuperação-sobre-a-execução-observada) |
 | 4 | Quais foram os resultados medidos a 50 consultas por segundo e qual a perda? | [Seção 4](#4-resultados-de-50-reqs-com-perda-máxima-de-5) |
 
-**Versão demonstrada.** Todos os links de código apontam para o commit [`48a08a0`](https://github.com/antonio-leonardo/FinancialTransactions/tree/48a08a05653c52f69465e2ab5e000ba8ba7bf962) e as linhas foram conferidas lendo cada arquivo nesse commit. O código de produto (`src/`) não foi alterado para esta demonstração; o que foi acrescentado é o script [`scripts/Demonstracao-Independencia.ps1`](../scripts/Demonstracao-Independencia.ps1), este documento e os resultados em [`docs/demonstracao/`](demonstracao/). **Fonte dos resultados:** execução do executor em 21/10/2026 (horários em UTC nas tabelas), numa máquina de desenvolvimento única. Reprodução por terceiros: ver a coluna de estado em [verificacao.md](verificacao.md), seção 0. Como reproduzir tudo: [seção 5](#5-como-reproduzir).
+**Versão demonstrada.** Todos os links de código apontam para o commit [`48a08a0`](https://github.com/antonio-leonardo/FinancialTransactions/tree/48a08a05653c52f69465e2ab5e000ba8ba7bf962) e as linhas foram conferidas lendo cada arquivo nesse commit. O código de produto (`src/`) não foi alterado para esta demonstração; o que foi acrescentado são os dois testes [`DemonstracaoIndependenciaTests.cs`](../tests/FinancialTransactions.IntegrationTests/DemonstracaoIndependenciaTests.cs) (seção 2.1), este documento e o resultado do L1 novo em [`docs/demonstracao/l1-48a08a0-resumo.json`](demonstracao/l1-48a08a0-resumo.json). Os links de código das seções 1 e 3 apontam para `48a08a0`; os testes novos são referenciados por caminho relativo. **Fonte dos resultados:** execução do executor em 21/10/2026 (horários em UTC nas tabelas), numa máquina de desenvolvimento única. Reprodução por terceiros: ver a coluna de estado em [verificacao.md](verificacao.md), seção 0. Como reproduzir tudo: [seção 5](#5-como-reproduzir).
 
 ## 1. Onde está a independência
 
@@ -71,7 +71,7 @@ Referência de compilação não é dependência operacional: o que conta é o c
 | Configuração obrigatória | leitura de [Program.cs:L39-L47](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Api/Program.cs#L39-L47) e [appsettings.json:L9-L11](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Api/appsettings.json#L9-L11) | A API exige apenas a chave de assinatura JWT (mínimo de 32 bytes) e `ConnectionStrings:FinancialTransactions`. Não existe configuração da projeção. |
 | Inicialização | `git grep -n -E 'Migrate\(\|MigrateAsync\|EnsureCreated\|IHostedService\|AddHostedService\|BackgroundService' 48a08a0 -- src/FinancialTransactions.Api src/FinancialTransactions.Infrastructure src/FinancialTransactions.Auth` | Nenhuma ocorrência: a API não aplica migration, não roda serviço de fundo e não consulta a projeção ao subir. |
 | Binário compilado (mesmo código) | `Get-Content src/FinancialTransactions.Api/bin/Release/net10.0/FinancialTransactions.Api.deps.json` após `dotnet build -c Release` | O manifesto de dependências lista só `FinancialTransactions.Api`, `.Auth`, `.Domain` e `.Infrastructure`; a pasta de saída tem apenas essas DLLs do projeto. |
-| Prova executada | [seção 2](#2-teste-executado-consolidação-interrompida-com-novos-lançamentos) | O script sobe a API de lançamentos **sem** `FT__ConnectionStrings__Consolidation` no ambiente e ela registra os lançamentos durante a falha. |
+| Prova executada | [seção 2](#2-teste-executado-consolidação-interrompida-com-novos-lançamentos) | Os dois testes registram os lançamentos durante a falha na API de lançamentos da fixture, cuja composição não tem `DbContext` nem fábrica da projeção (o teste C13 afirma que ambos são nulos). |
 
 ### 1.4 Fronteira declarada
 
@@ -83,91 +83,85 @@ Referência de compilação não é dependência operacional: o que conta é o c
 
 ## 2. Teste executado: consolidação interrompida com novos lançamentos
 
-### 2.1 O que o script faz
+### 2.1 Os dois testes
 
-[`scripts/Demonstracao-Independencia.ps1`](../scripts/Demonstracao-Independencia.ps1) (PowerShell 7) sobe, em bancos descartáveis próprios, os três processos reais da solução (API de lançamentos em 5100, Worker em 5120, API do consolidado em 5110) e executa, num dos dois cenários:
+Dois testes na suíte de integração ([`DemonstracaoIndependenciaTests.cs`](../tests/FinancialTransactions.IntegrationTests/DemonstracaoIndependenciaTests.cs)) executam a mesma sequência (6 lançamentos, interrupção comprovada, 10 lançamentos novos, retomada, reconciliação, repetição sem efeito) e imprimem uma tabela com observações reais:
 
-| Etapa | O que acontece | O que prova |
-|---|---|---|
-| Antes | 6 lançamentos fixos pela própria API (A1 +100,00, A1 −30,00, A1 +20,00, A2 +50,00, A2 −8,00, B1 +10,00); coordenador `--backfill`; Worker e API do consolidado sobem; o script espera a fase `live` e `pending = 0`. | Estado inicial conhecido: `processed_events` = os 6 ids; consolidado `complete` com os valores que o **próprio script calculou** da sua lista. |
-| Interrupção | `Workers`: o processo do Worker é encerrado. `Projection`: o container PostgreSQL **dedicado** da demonstração, que guarda a projeção, é parado (`docker stop`). | Sinais comprovados antes de qualquer lançamento da janela (processo terminado, porta fechada e `/health/live` sem resposta; ou `ready` do Worker e da API do consolidado em 503, consolidado em `503 dependency_unavailable` e o log do Worker com falha transitória e backoff, sem quarentena). |
-| Durante | 10 lançamentos novos, um a um, por HTTP (A1 +40,00, A1 −15,00, A2 +25,00, B1 −3,00, A1 +12,50, A2 −5,50, B1 +60,00, A1 −7,25, A2 +9,99, B1 +1,01). | `10 de 10` com `201`; os 10 movimentos e as 10 linhas da Outbox (`status = 0`) existem **na origem**, conferidos por conjunto de ids; a projeção não contém nenhum deles (ou está inacessível, o que é registrado como "inacessível", não como zero); a posição por instante na origem (200) soma os lançamentos novos. |
-| Retomada | Restaura **só o interrompido** (novo processo do Worker, ou `docker start` do container dedicado). Nada é recriado, limpo ou reconstruído. | Tempo medido, por polling de 500 ms e prazo de 120 s, até `pending = 0` **e** os 10 ids em `processed_events`. |
-| Depois | Conjuntos e valores. Repetição de uma operação da janela. | `movements` = Outbox processada = `processed_events` = 16 ids, sem duplicados; valores por conta na origem = projeção = esperado do script; consolidado `complete`; repetição com a mesma chave devolve `200`, o mesmo `movementId`, nenhum movimento ou evento novo. |
+| Teste | Interrupção |
+|---|---|
+| `Demonstracao_1_ConsolidacaoInterrompida_WorkerParado_NovosLancamentosAceitos_RetomadaReconciliada` | o único Worker é parado (o laço termina e o listener recusa conexões); a retomada é um host novo do Worker sobre os mesmos bancos |
+| `Demonstracao_2_ConsolidacaoInterrompida_ProjecaoInalcancavel_NovosLancamentosAceitos_RetomadaReconciliada` | a conexão com a projeção é tornada inalcançável **por papel** (`Consumer` e `Health` no Worker; `Query` e `Health` na API do consolidado) com o PostgreSQL de pé e a origem intacta; a retomada restaura os papéis, sem reiniciar nenhum host |
 
-Toda espera é por condição observável com prazo. Códigos de saída: `0` demonstração válida e aprovada; `10` algum critério reprovado (resultado preservado); `30` pré-condição não atendida ou execução inválida (grava `invalido.json`, nunca um resultado parcial). Recursos criados (bancos `ft_demo_<sufixo>_src` e `_cons`, processos por PID e, em `Projection`, o container `ft-demo-cons-<sufixo>`) são registrados antes de existir e removidos no `finally` pela lista exata. **Os containers do `docker-compose.yml` não são parados nem recriados**, e o script confere que continuam com os mesmos ids e `healthy`.
+```powershell
+docker compose up -d --wait
+dotnet build FinancialTransactions.sln -c Release -warnaserror
+dotnet test tests/FinancialTransactions.IntegrationTests/FinancialTransactions.IntegrationTests.csproj -c Release --no-build --settings tests/vstest.runsettings --filter "DisplayName~Demonstracao" --logger "console;verbosity=detailed"
+```
 
-### 2.2 Por que a projeção do cenário `Projection` vive num container dedicado
+A saída de cada teste mostra a tabela `T (s) | estado do componente | confirmados | pendentes | processed_events | saldo esperado A1 | saldo observado A1` e, ao final, um resumo em que cada linha é uma verificação efetivamente satisfeita (se uma etapa falha, a última observação e a falha ficam na saída e não há resumo de êxito). O logger do console pode mostrar a saída ao término do teste, não em tempo real; com `--logger trx --results-directory <pasta>` ela também vai para o relatório. Trecho real da saída do Demonstracao_2 (tempos da fixture):
 
-A primeira ideia, tornar o banco da projeção indisponível com `ALTER DATABASE ... CONNECTION LIMIT 0` seguido de `pg_terminate_backend`, **não funciona neste ambiente**: o usuário `ft` das imagens `postgres` é superusuário, e superusuários são isentos do limite de conexões. Foi testado antes, num banco-sonda descartável: com `CONNECTION LIMIT 0` a conexão de `ft` seguiu aceita (`ALLOW_CONNECTIONS false` bloqueia, mas é outro mecanismo e não foi usado). Por isso o script cria um PostgreSQL próprio da demonstração (`docker run postgres:17`, porta 15439, nome `ft-demo-cons-<sufixo>`), guarda nele a projeção, o para e o religa; ao final ele é removido. A origem fica no container do `docker-compose.yml`, que nunca é tocado.
+```text
+DEMONSTRAÇÃO 2: a conexão com a projeção é tornada inalcançável para o Worker e a API do consolidado (PostgreSQL de pé); a escrita segue; a conexão é restaurada.
+Tempos da fixture (intervalos do laço reduzidos); não são RTO. Não mede 50 req/s.
+T (s) | estado do componente                                           | confirmados | pendentes | processed_events | saldo esperado A1 | saldo observado A1
+1.64 | S0: Worker, API do consolidado e API de lançamentos no ar; fase live |           6 |        0 |               6 |             90.00 | 90.00 complete
+5.76 | interrupção comprovada: projeção inalcançável por papel (PostgreSQL de pé) |           6 |        0 |               6 |             90.00 | HTTP 503
+12.11 | janela: 10 lançamentos com 201; pendentes na Outbox            |          16 |       10 |               6 |            120.25 | HTTP 503
+14.47 | convergência: pending = 0 e os 10 ids na projeção              |          16 |        0 |              16 |            120.25 | 120.25 complete
+14.71 | depois: reconciliação concluída; repetição sem efeito          |          16 |        0 |              16 |            120.25 | 120.25 complete
 
-### 2.3 Resultados
+RESUMO: 37 verificações satisfeitas (uma por asserção; omitidas aqui).
+```
 
-Os dois cenários foram executados sobre `48a08a0`, cada um em bancos novos. Os resultados completos (critérios, lançamentos com início, fim, status, `movementId` e `Location`, consultas ao consolidado e linha do tempo) estão em [independencia-workers.md](demonstracao/independencia-workers.md) / [.json](demonstracao/independencia-workers.json) e [independencia-projecao.md](demonstracao/independencia-projecao.md) / [.json](demonstracao/independencia-projecao.json).
+O que este teste **é** e **não é**:
 
-| Critério | `Workers` | `Projection` |
-|---|---|---|
-| Sinais da falha comprovados antes da janela | aprovado: processo terminado, porta 5120 fechada, `/health/live` sem resposta; readiness da escrita 200 | aprovado: `ready` do Worker e da API do consolidado 503; consolidado 503 `dependency_unavailable`; log do Worker com classe `Transient`; quarentena 0; readiness da escrita 200 |
-| Escrita durante a falha | **10 de 10 com `201`** | **10 de 10 com `201`** |
-| Persistência na origem durante a falha | 10 movimentos, 10 linhas na Outbox, 10 pendentes | 10 movimentos, 10 linhas na Outbox, 10 pendentes |
-| Posição por instante na origem durante a falha | 200; A1 = 120,25 (esperado 120,25) | 200; A1 = 120,25 (esperado 120,25) |
-| Projeção durante a falha | 0 dos 10 ids em `processed_events` | inacessível (consulta direta falhou; porta fechada) |
-| Consolidado durante a falha | 200 `stale`, `unresolvedEvents`: A1 4, A2 3, B1 3, cliente A 7, cliente B 3 (valores ainda os de antes) | 503 `dependency_unavailable` nas 5 consultas |
-| Convergência (da emissão da restauração até `pending = 0` e os 10 ids na projeção) | 3,47 s | 8,08 s |
-| Reconciliação por conjuntos e valores | 16 = 16 = 16 ids, sem duplicados; valores origem = projeção = esperado | idem |
-| Consolidado depois | 5 consultas `complete`, valores esperados (A1: créditos 172,50, débitos 52,25, líquido 120,25, 7 movimentos) | idem |
-| Idempotência (repetir `demo-...-w-01`) | `200`, mesmo `movementId`, 16 movimentos e 16 eventos antes e depois, consolidado inalterado | idem |
-| Containers do projeto | mesmos ids, `healthy` | mesmos ids, `healthy` |
-| API de lançamentos | mesmo processo do começo ao fim (sem reinício) | idem |
+- Os hosts do Worker e da API do consolidado rodam em Kestrel **dentro do processo de teste** (não são processos separados), contra dois PostgreSQL reais; a fixture cria e remove os seus bancos e a sua chave.
+- No teste 2 a falha é de **conexão injetada por papel**, com o PostgreSQL e o container de pé. A consulta de controle do teste pela conexão administrativa continua funcionando e é identificada como caminho administrativo, fora da falha. O container não é parado.
+- Os tempos de convergência são da fixture (intervalos do laço reduzidos: espera ociosa de 50 ms, backoff de 100 ms a 5 s). Não são RTO.
+- **Não mede 50 req/s.** Os resultados de 50 req/s com perda máxima de 5% estão na [seção 4](#4-resultados-de-50-reqs-com-perda-máxima-de-5) e em [carga-consolidado.md](carga-consolidado.md), com o roteiro público de reprodução.
 
-**Leitura.** Em `Workers`, a API do consolidado continuou respondendo durante a falha, mas com `stale` e os valores de antes: o processamento estava interrompido, a leitura não. Em `Projection`, sem a projeção, o consolidado respondeu `503`: não há saldo para devolver, e a API não inventa um. Nos dois casos os 10 lançamentos foram aceitos com `201`, em 15 a 33 ms cada, e a posição por instante, lida na origem, já os refletia.
+### 2.2 Outros testes automatizados do mesmo comportamento
 
-### 2.4 Testes automatizados correspondentes
-
-O mesmo comportamento é exercitado nos testes de integração, com dois PostgreSQL reais ([`ConsolidationIndependenceTests.cs`](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs)): [ConsolidationIndependenceTests.cs:L28](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L28) (C1: Worker parado, lançamentos aceitos, consolidado `stale`), [ConsolidationIndependenceTests.cs:L63](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L63) (C2: Worker novo aplica exatamente os 3 eventos e reconcilia), [ConsolidationIndependenceTests.cs:L106](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L106) (C3: projeção inalcançável, escrita no ar, consolidado 503 em menos de 2 s), [ConsolidationIndependenceTests.cs:L145](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L145) (C4: projeção volta depois de seis tentativas falhas, mesmo host se recupera sozinho), [ConsolidationIndependenceTests.cs:L186](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L186) (C5: API do consolidado fora) e [ConsolidationIndependenceTests.cs:L209](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L209) (C13: regressão da readiness da escrita). A diferença para este script é a natureza da evidência: os testes rodam hosts no processo de teste; o script usa os executáveis Release em processos reais.
+Além dos dois testes de demonstração, o mesmo comportamento é exercitado nos testes de integração C1 a C5 e C13, com dois PostgreSQL reais ([`ConsolidationIndependenceTests.cs`](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs)): [ConsolidationIndependenceTests.cs:L28](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L28) (C1: Worker parado, lançamentos aceitos, consolidado `stale`), [ConsolidationIndependenceTests.cs:L63](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L63) (C2: Worker novo aplica exatamente os 3 eventos e reconcilia), [ConsolidationIndependenceTests.cs:L106](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L106) (C3: projeção inalcançável, escrita no ar, consolidado 503 em menos de 2 s), [ConsolidationIndependenceTests.cs:L145](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L145) (C4: projeção volta depois de seis tentativas falhas, mesmo host se recupera sozinho), [ConsolidationIndependenceTests.cs:L186](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L186) (C5: API do consolidado fora) e [ConsolidationIndependenceTests.cs:L209](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/tests/FinancialTransactions.IntegrationTests/ConsolidationIndependenceTests.cs#L209) (C13: regressão da readiness da escrita). Todos rodam hosts no processo de teste, contra PostgreSQL reais.
 
 ## 3. Recuperação sobre a execução observada
 
-Cada tabela vem de uma execução real da seção 2. `T` é o tempo em segundos desde o instante em que a interrupção foi emitida (T = 0). "Confirmados" são lançamentos que a API respondeu `201`; "Pendentes" são linhas da Outbox com `status = 0`; o "saldo esperado de A1" é o que o script calcula da sua própria lista de lançamentos confirmados; o "observado" é o que a API do consolidado devolveu.
+Cada tabela é a que um dos dois testes imprime ([seção 2.1](#21-os-dois-testes)), copiada de uma execução local de 21/10/2026. Os tempos são **da fixture** (intervalos do laço reduzidos): não são RTO. `T` é o tempo em segundos desde o início do teste (inclui a preparação). "Confirmados" são lançamentos que a API respondeu `201`; "Pendentes" são linhas da Outbox com `status = 0`; `processed_events` conta os marcadores da projeção (lidos pela conexão administrativa do teste); o "saldo esperado de A1" é o que o teste calcula da sua própria lista de lançamentos confirmados; o "observado" é o que a API do consolidado devolveu.
 
-### 3.1 `Workers` (execução `wk5`)
+### 3.1 `Demonstracao_1`: Worker parado
 
 | T (s) | Estado do componente | Confirmados | Pendentes | `processed_events` | Saldo esperado A1 | Saldo observado A1 |
 |---:|---|---:|---:|---:|---:|---|
-| −0,01 | Antes: API de lançamentos, Worker e API do consolidado no ar; fase `live` | 6 | 0 | 6 | 90,00 | 90,00 `complete` |
-| +0,02 | Encerramento do Worker emitido | 6 | 0 | 6 | 90,00 | 90,00 |
-| +5,08 | Interrupção comprovada: processo terminado, porta 5120 fechada, `/health/live` sem resposta | 6 | 0 | 6 | 90,00 | — |
-| +5,09 a +5,28 | Janela: 10 `POST`, todos `201` | 16 | 10 | 6 (0 dos 10) | 120,25 | 90,00 `stale`, 4 não resolvidos; posição na origem: 120,25 |
-| +6,37 | Verificações durante a falha concluídas; restauração emitida | 16 | 10 | 6 | 120,25 | 90,00 `stale` |
-| +7,90 | Novo processo do Worker iniciado (mesmos binários e configuração) | 16 | 10 → 0 | 6 → 16 | 120,25 | — |
-| +9,84 | Convergência: `pending = 0` e os 10 ids em `processed_events` (3,47 s depois da restauração emitida) | 16 | 0 | 16 | 120,25 | — |
-| depois | Reconciliação e consultas | 16 | 0 | 16 | 120,25 | 120,25 `complete` |
+| 0,46 | S0: Worker, API do consolidado e API de lançamentos no ar; fase `live` | 6 | 0 | 6 | 90,00 | 90,00 `complete` |
+| 2,52 | Interrupção comprovada: Worker parado, listener recusa conexões | 6 | 0 | 6 | 90,00 | 90,00 `complete` |
+| 2,74 | Janela: 10 lançamentos com `201`; pendentes na Outbox | 16 | 10 | 6 | 120,25 | 90,00 `stale` |
+| 3,03 | Convergência: `pending = 0` e os 10 ids na projeção (0,28 s depois da restauração) | 16 | 0 | 16 | 120,25 | 120,25 `complete` |
+| 3,20 | Depois: reconciliação concluída; repetição sem efeito | 16 | 0 | 16 | 120,25 | 120,25 `complete` |
 
-### 3.2 `Projection` (execução `pj3`)
+### 3.2 `Demonstracao_2`: projeção inalcançável
 
 | T (s) | Estado do componente | Confirmados | Pendentes | `processed_events` | Saldo esperado A1 | Saldo observado A1 |
-|---:|---|---:|---:|---|---:|---|
-| −0,01 | Antes: tudo no ar; projeção no container dedicado; fase `live` | 6 | 0 | 6 | 90,00 | 90,00 `complete` |
-| +0,61 | `docker stop` do container da projeção concluído | 6 | 0 | inacessível | 90,00 | — |
-| +4,01 | Interrupção comprovada: `ready` do Worker 503, `ready` da API do consolidado 503, consulta 503 `dependency_unavailable`, log com falha `Transient`, quarentena 0 | 6 | 0 | inacessível | 90,00 | 503 |
-| +4,02 a +4,20 | Janela: 10 `POST`, todos `201`; Worker e API do consolidado vivos, mas sem a projeção | 16 | 10 | inacessível (não é zero) | 120,25 | 503; posição na origem: 120,25 |
-| +13,78 | Verificações durante a falha concluídas; restauração emitida (`docker start`) | 16 | 10 | inacessível | 120,25 | 503 |
-| +21,84 | Convergência: `pending = 0` e os 10 ids em `processed_events` (8,08 s depois da restauração emitida) | 16 | 0 | 16 | 120,25 | — |
-| depois | Reconciliação e consultas | 16 | 0 | 16 | 120,25 | 120,25 `complete` |
+|---:|---|---:|---:|---:|---:|---|
+| 1,64 | S0: Worker, API do consolidado e API de lançamentos no ar; fase `live` | 6 | 0 | 6 | 90,00 | 90,00 `complete` |
+| 5,76 | Interrupção comprovada: projeção inalcançável por papel (PostgreSQL de pé) | 6 | 0 | 6 | 90,00 | HTTP 503 |
+| 12,11 | Janela: 10 lançamentos com `201`; pendentes na Outbox | 16 | 10 | 6 | 120,25 | HTTP 503 |
+| 14,47 | Convergência: `pending = 0` e os 10 ids na projeção (2,35 s depois da restauração) | 16 | 0 | 16 | 120,25 | 120,25 `complete` |
+| 14,71 | Depois: reconciliação concluída; repetição sem efeito | 16 | 0 | 16 | 120,25 | 120,25 `complete` |
+
+No teste 2 a contagem de `processed_events` vem do caminho administrativo do teste, fora da falha injetada; para o Worker e a API do consolidado a projeção está inalcançável nesse intervalo (e o consolidado responde 503, não zero). As linhas de "janela" aparecem depois das verificações feitas durante a falha, por isso o tempo é maior no teste 2 (cada consulta ao consolidado espera a recusa de conexão).
 
 ### 3.3 A estratégia, amarrada às linhas das tabelas
-
-- **Onde o trabalho ficou durável.** Na Outbox da origem, gravada na mesma transação do movimento ([RegisterMovementHandler.cs:L104-L117](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Api/Movements/RegisterMovementHandler.cs#L104-L117)). É por isso que, nas linhas "+5,09 a +5,28" e "+4,02 a +4,20", os 10 lançamentos existem e estão pendentes mesmo sem consumidor ou sem projeção: nada depende de memória de processo.
-- **Como foi retomado.** O Worker tenta reservar o próximo evento pendente ([OutboxConsolidationSource.cs:L54-L72](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Consolidation/OutboxConsolidationSource.cs#L54-L72)). Em `Projection`, o ciclo falha ao ler a fase da projeção, **antes** de reservar qualquer evento: a falha é classificada como transitória, não conta tentativa de nenhum evento, e o laço espera com backoff de 1 s a 30 s ([ConsolidationConsumer.cs:L138-L187](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Consolidation/ConsolidationConsumer.cs#L138-L187)). Quando o banco volta, o próximo ciclo bem-sucedido consome os 10 eventos sozinho: **ninguém interveio**, e o tempo de 8,08 s depende de em que ponto do backoff o laço estava. Em `Workers`, um novo processo reserva os 10 eventos assim que sobe e fica `live` (3,47 s, incluindo a partida do processo). Se um Worker morrer **no meio** de um evento, a reserva (45 s, no relógio do banco de origem) vence e outra instância assume; essa situação não foi provocada nestas execuções (em ambas `pending` era 0 no momento da interrupção) e é coberta pelos testes do ADR-14 em [arquitetura.md](arquitetura.md).
+- **Onde o trabalho ficou durável.** Na Outbox da origem, gravada na mesma transação do movimento ([RegisterMovementHandler.cs:L104-L117](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Api/Movements/RegisterMovementHandler.cs#L104-L117)). É por isso que, nas linhas "Janela" dos dois testes, os 10 lançamentos existem e estão pendentes mesmo sem consumidor ou sem projeção: nada depende de memória de processo.
+- **Como foi retomado.** O Worker tenta reservar o próximo evento pendente ([OutboxConsolidationSource.cs:L54-L72](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Consolidation/OutboxConsolidationSource.cs#L54-L72)). No teste 2, o ciclo falha ao ler a fase da projeção (papel `Consumer` redirecionado), **antes** de reservar qualquer evento: a falha é classificada como transitória, não conta tentativa de nenhum evento, e o laço espera com backoff (de 100 ms a 5 s na fixture; de 1 s a 30 s em produção) ([ConsolidationConsumer.cs:L138-L187](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Consolidation/ConsolidationConsumer.cs#L138-L187)). Quando o banco volta, o próximo ciclo bem-sucedido consome os 10 eventos sozinho: **ninguém interveio**, e o tempo de 2,35 s depende de em que ponto do backoff o laço estava. No teste 1, um host novo do Worker reserva os 10 eventos assim que sobe e a fase já é `live` (0,28 s). Se um Worker morrer **no meio** de um evento, a reserva (45 s, no relógio do banco de origem) vence e outra instância assume; essa situação não é provocada por estes dois testes (em ambos `pending` era 0 no momento da interrupção) e é coberta pelos testes do ADR-14 em [arquitetura.md](arquitetura.md).
 - **Por que não duplica.** A soma e o marcador `processed_events` ficam na **mesma** transação da projeção ([DailyConsolidationApplier.cs:L33-L75](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Consolidation/DailyConsolidationApplier.cs#L33-L75)); um evento já aplicado não soma de novo. Se a confirmação na origem ficar sem resposta depois do commit da projeção, nada é forçado: o evento permanece pendente, é reentregue e deduplicado pelo marcador ([ConsolidationConsumer.cs:L449-L463](https://github.com/antonio-leonardo/FinancialTransactions/blob/48a08a05653c52f69465e2ab5e000ba8ba7bf962/src/FinancialTransactions.Consolidation/ConsolidationConsumer.cs#L449-L463)). A linha "depois" mostra o efeito: 16 movimentos = 16 eventos processados = 16 marcadores, sem duplicados, e a repetição de uma operação da janela não criou movimento nem evento.
-- **O que é administrativo.** Só um evento **defeituoso** (inválido por si) vai à quarentena, depois de cinco tentativas; falha de ambiente ou de infraestrutura nunca manda evento para lá (`quarentena 0` nas duas execuções). Quarentena é tratada por `--list-quarantine` e `--requeue` (dry-run por padrão, com trilha), descritos no [README](../README.md#comandos-administrativos-do-worker). `--status` mostra o estado a qualquer momento; `--verify` compara a projeção com os movimentos imutáveis e a reconstrução em banco paralelo está em [recuperacao.md](recuperacao.md).
+- **O que é administrativo.** Só um evento **defeituoso** (inválido por si) vai à quarentena, depois de cinco tentativas; falha de ambiente ou de infraestrutura nunca manda evento para lá (o teste 2 verifica quarentena 0 durante a falha). Quarentena é tratada por `--list-quarantine` e `--requeue` (dry-run por padrão, com trilha), descritos no [README](../README.md#comandos-administrativos-do-worker). `--status` mostra o estado a qualquer momento; `--verify` compara a projeção com os movimentos imutáveis e a reconstrução em banco paralelo está em [recuperacao.md](recuperacao.md).
 - **Informação tardia (H9).** Um lançamento com `effectiveAt` no passado, registrado depois, altera a linha do dia daquele `effectiveAt` e, por derivação, o fechamento acumulado dos dias seguintes; a projeção não "volta no tempo" e não existe consulta "como se sabia em T" ([escopo.md](escopo.md), H9).
 
 ### 3.4 O que isto garante e o que não garante
 
 - **Garante**, nas condições medidas: lançamentos aceitos durante a falha ficam duráveis na origem; o consolidado converge sozinho quando o componente interrompido volta; nenhum valor é somado duas vezes; a resposta nunca afirma completude que não comprovou (`stale` e `503` em vez de saldo inventado).
 - **Não é** *exactly-once* ponta a ponta: a entrega é *pelo menos uma vez* e a soma é *no máximo uma vez* por causa do marcador (ADR-10).
-- **Não há** recuperação instantânea: 3,47 s e 8,08 s são medidas de uma máquina, de um evento pequeno (10 eventos) e dependem do backoff; com milhares de eventos pendentes, a vazão de um Worker medida no bootstrap foi de cerca de 61 eventos/s ([carga-consolidado.md](carga-consolidado.md), seção 3).
+- **Não há** recuperação instantânea: 0,28 s e 2,35 s são tempos da fixture, de uma máquina, para 10 eventos, e dependem do backoff; com milhares de eventos pendentes, a vazão de um Worker medida no bootstrap foi de cerca de 61 eventos/s ([carga-consolidado.md](carga-consolidado.md), seção 3).
 - **Não é** alta disponibilidade de produção e **não há RTO/RPO medidos nem contratados**: os pontos únicos de falha estão em [alta-disponibilidade.md](alta-disponibilidade.md). A queda da origem derruba a escrita.
 - **Contagens que não puderam ser lidas** ficam "desconhecidas" (`unknown`, "inacessível"), nunca zero. Leituras em dois bancos **não** são um instantâneo atômico.
 
@@ -216,7 +210,7 @@ Limite que continua: o **código-fonte do gerador de carga** (`tools/FinancialTr
 
 ### 4.3 Execução nova de L1 sobre `48a08a0`
 
-Executada em 21/10/2026 pelo executor, **sem nenhum script privado**: os passos 1 a 7 de [carga-consolidado.md](carga-consolidado.md), seção 9, na raiz do repositório, com a ferramenta e os processos compilados de `48a08a0`, bancos descartáveis `ft_load_p08_demo_src` e `ft_load_p08_demo_cons` (removidos ao final; os containers do projeto não foram tocados). Esta é uma execução **nova**, distinta das repetições do quadro.
+Executada em 21/10/2026 pelo executor, **sem nenhum script fora do repositório**: os passos 1 a 7 de [carga-consolidado.md](carga-consolidado.md), seção 9, na raiz do repositório, com a ferramenta e os processos compilados de `48a08a0`, bancos descartáveis `ft_load_p08_demo_src` e `ft_load_p08_demo_cons` (removidos ao final; os containers do projeto não foram tocados). Esta é uma execução **nova**, distinta das repetições do quadro.
 
 | Etapa | Resultado |
 |---|---|
@@ -239,30 +233,22 @@ O `resumo.json` da ferramenta, sem caminhos nem segredos, está em [l1-48a08a0-r
 
 ## 5. Como reproduzir
 
-Pré-requisitos: Git, SDK .NET 10, Docker com Compose v2 e PowerShell 7.4 ou superior ([README](../README.md), "Pré-requisitos"). Credencial de laboratório: a senha sintética do `docker-compose.yml`.
+Pré-requisitos: Git, SDK .NET 10, Docker com Compose v2 e um shell (os exemplos usam PowerShell; o roteiro de L1 da seção 4.3 usa PowerShell 7) ([README](../README.md), "Pré-requisitos").
 
 ```powershell
 git clone https://github.com/antonio-leonardo/FinancialTransactions.git
 cd FinancialTransactions
 docker compose up -d --wait
-dotnet tool restore
-dotnet build FinancialTransactions.sln -c Release
-
-# Seção 2: um cenário por execução; a saída vai para uma pasta fora do repositório (padrão: pasta temporária)
-pwsh -NoProfile -File scripts/Demonstracao-Independencia.ps1 -Scenario Workers
-pwsh -NoProfile -File scripts/Demonstracao-Independencia.ps1 -Scenario Projection
-# código de saída 0 = aprovado; 10 = critério reprovado; 30 = pré-condição ou execução inválida
+dotnet build FinancialTransactions.sln -c Release -warnaserror
+dotnet test tests/FinancialTransactions.IntegrationTests/FinancialTransactions.IntegrationTests.csproj -c Release --no-build --settings tests/vstest.runsettings --filter "DisplayName~Demonstracao" --logger "console;verbosity=detailed"
 ```
 
-O script cria bancos `ft_demo_<sufixo>_*` próprios e, em `Projection`, um container `ft-demo-cons-<sufixo>` (porta 15439, configurável por `-DedicatedPort`); as portas 5100, 5110 e 5120 precisam estar livres. A pasta de saída recebe `resultado.json`, `resultado.md` e `logs/`. Os links de código das seções 1 a 3 valem para `48a08a0`; o script e os documentos desta demonstração estão no commit que os publica, com o mesmo `src/`.
-
-```powershell
-# Seção 4.3: o roteiro de L1 (passos 1 a 7) está em docs/carga-consolidado.md, seção 9 (roteiro de reprodução), e leva cerca de 30 minutos
-```
+Isto executa os dois testes da seção 2.1 (independência e recuperação; **não** medem 50 req/s). Os links de código das seções 1 e 3 valem para `48a08a0`; os testes e este documento estão no commit que os publica, com o mesmo `src/`. O roteiro de L1 (passos 1 a 7) está em [carga-consolidado.md](carga-consolidado.md), seção 9, e leva cerca de 30 minutos.
 
 ## 6. Limites gerais desta demonstração
 
-- Os resultados são de **uma** execução de cada cenário na versão final do script, numa máquina; execuções anteriores do mesmo script, com versões anteriores, não são citadas como resultado.
-- 10 lançamentos por janela é uma demonstração de comportamento, não de carga; a janela da falha durou menos de 1 s entre o primeiro e o último `POST`.
-- Não foi provocada a morte de um Worker no meio de um evento, nem a perda definitiva de um banco; esses casos estão descritos em [arquitetura.md](arquitetura.md) (ADR-14 e ADR-15) e [recuperacao.md](recuperacao.md), com os testes correspondentes.
+- Os resultados dos testes são de uma execução local, numa máquina, com tempos da fixture (laço reduzido).
+- Os testes usam hosts do Worker e da API do consolidado dentro do processo de teste e falha de conexão injetada por papel (teste 2); **não** exercitam processos separados nem a parada de um container.
+- 10 lançamentos por janela é uma demonstração de comportamento, não de carga.
+- Não é provocada a morte de um Worker no meio de um evento, nem a perda definitiva de um banco; esses casos estão descritos em [arquitetura.md](arquitetura.md) (ADR-14 e ADR-15) e [recuperacao.md](recuperacao.md), com os testes correspondentes.
 - Alta disponibilidade continua sendo proposta, não implementação.
